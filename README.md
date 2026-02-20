@@ -1,7 +1,7 @@
 # cfDNA-Gen
 
 [![PyPI version](https://badge.fury.io/py/cfdna-gen.svg)](https://badge.fury.io/py/cfdna-gen)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-red.svg)](https://polyformproject.org/licenses/noncommercial/1.0.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
 **Conditional Causal Transformer for Cell-Free DNA Sequence Generation**
@@ -225,7 +225,12 @@ If you use cfDNA-Gen in your research, please cite:
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+This software is dual-licensed:
+
+- **Free** for academic, research, educational, and personal non-commercial use under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
+- **Commercial use** requires a separate paid license. Contact [kyle@eabhaseq.com](mailto:kyle@eabhaseq.com) for details.
+
+See [LICENSE](LICENSE) for full terms.
 
 ## Contributing
 

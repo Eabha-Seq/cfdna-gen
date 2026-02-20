@@ -7,7 +7,7 @@ name = "cfdna-gen"
 version = "1.0.0"
 description = "Conditional Causal Transformer for Cell-Free DNA Sequence Generation"
 readme = "README.md"
-license = "MIT"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 requires-python = ">=3.10"
 authors = [
     { name = "Kyle Redelinghuys", email = "kyle@eabhaseq.com" }
@@ -28,7 +28,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Healthcare Industry",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

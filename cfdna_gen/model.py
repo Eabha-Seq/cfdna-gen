@@ -20,7 +20,7 @@ Example:
 
 import json
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 from .tokens import VOCAB_SIZE, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD
 
-__all__ = ["CfDNAConfig", "CfDNACausalLM"]
+__all__ = ["CfDNAConfig", "CfDNACausalLM", "StaticKVCache"]
 
 
 @dataclass
@@ -152,6 +152,59 @@ class SwiGLU(nn.Module):
         return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 
+class StaticKVCache:
+    """
+    Pre-allocated static KV cache for efficient autoregressive generation.
+
+    Instead of dynamically growing the cache with torch.cat each step
+    (which triggers memory allocation), this pre-allocates the full cache
+    upfront and writes into it with indexing. This is both faster and
+    enables torch.compile compatibility.
+    """
+
+    def __init__(
+        self,
+        num_layers: int,
+        batch_size: int,
+        max_seq_len: int,
+        num_heads: int,
+        head_dim: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ):
+        self.num_layers = num_layers
+        self.max_seq_len = max_seq_len
+        # Pre-allocate K and V for all layers: [B, num_heads, max_seq_len, head_dim]
+        self.k_cache = torch.zeros(
+            num_layers, batch_size, num_heads, max_seq_len, head_dim,
+            device=device, dtype=dtype,
+        )
+        self.v_cache = torch.zeros(
+            num_layers, batch_size, num_heads, max_seq_len, head_dim,
+            device=device, dtype=dtype,
+        )
+        self.seq_len = 0
+
+    def update(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Write new K, V into the cache and return the full valid slice."""
+        new_len = k.shape[2]
+        end = self.seq_len + new_len
+        self.k_cache[layer_idx, :, :, self.seq_len:end, :] = k
+        self.v_cache[layer_idx, :, :, self.seq_len:end, :] = v
+        return (
+            self.k_cache[layer_idx, :, :, :end, :],
+            self.v_cache[layer_idx, :, :, :end, :],
+        )
+
+    def advance(self, n: int = 1):
+        """Advance the sequence position after all layers have been updated."""
+        self.seq_len += n
+
+    def reset(self):
+        """Reset the cache for a new generation."""
+        self.seq_len = 0
+
+
 class CausalSelfAttention(nn.Module):
     """Multi-head causal self-attention with RoPE and SDPA (Flash Attention)."""
 
@@ -176,6 +229,8 @@ class CausalSelfAttention(nn.Module):
         x: torch.Tensor,
         past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
+        static_cache: Optional[StaticKVCache] = None,
+        layer_idx: int = 0,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, L, D = x.shape
 
@@ -183,8 +238,14 @@ class CausalSelfAttention(nn.Module):
         k = self.k_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Handle KV cache
-        if past_kv is not None:
+        # Determine position offset for RoPE
+        if static_cache is not None:
+            offset = static_cache.seq_len
+            seq_len = offset + L
+            cos, sin = self.rotary_emb(q, seq_len)
+            cos = cos[offset:seq_len]
+            sin = sin[offset:seq_len]
+        elif past_kv is not None:
             past_k, past_v = past_kv
             seq_len = past_k.shape[2] + L
             cos, sin = self.rotary_emb(q, seq_len)
@@ -199,17 +260,22 @@ class CausalSelfAttention(nn.Module):
             q, k, cos.unsqueeze(0).unsqueeze(0), sin.unsqueeze(0).unsqueeze(0)
         )
 
-        # Concatenate past KV
-        if past_kv is not None:
+        # Handle caching
+        is_cached_decode = False
+        if static_cache is not None:
+            k, v = static_cache.update(layer_idx, k, v)
+            is_cached_decode = static_cache.seq_len > 0 and L == 1
+        elif past_kv is not None:
             k = torch.cat([past_k, k], dim=2)
             v = torch.cat([past_v, v], dim=2)
+            is_cached_decode = L == 1
 
         new_kv = (k, v) if use_cache else None
 
         # Use PyTorch's scaled_dot_product_attention (SDPA)
         dropout_p = self.dropout if self.training else 0.0
 
-        if past_kv is not None and L == 1:
+        if is_cached_decode:
             out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=False)
         else:
             out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
@@ -235,8 +301,13 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
+        static_cache: Optional[StaticKVCache] = None,
+        layer_idx: int = 0,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
-        attn_out, new_kv = self.attn(self.attn_norm(x), past_kv, use_cache)
+        attn_out, new_kv = self.attn(
+            self.attn_norm(x), past_kv, use_cache,
+            static_cache=static_cache, layer_idx=layer_idx,
+        )
         x = x + attn_out
         x = x + self.ffn(self.ffn_norm(x))
         return x, new_kv
@@ -499,6 +570,7 @@ class CfDNACausalLM(nn.Module):
         target_ff: Optional[torch.Tensor] = None,
         past_kv: Optional[list] = None,
         use_cache: bool = False,
+        static_cache: Optional[StaticKVCache] = None,
     ) -> Tuple[torch.Tensor, Optional[list]]:
         """
         Forward pass.
@@ -510,6 +582,7 @@ class CfDNACausalLM(nn.Module):
             target_ff: [B] optional target fetal fraction for conditioning
             past_kv: List of (k, v) tuples from previous steps (for generation)
             use_cache: Whether to return new KV cache
+            static_cache: Optional pre-allocated StaticKVCache for fast generation
 
         Returns:
             logits: [B, L, vocab_size]
@@ -534,7 +607,10 @@ class CfDNACausalLM(nn.Module):
         new_past_kv = [] if use_cache else None
         for i, block in enumerate(self.blocks):
             layer_past = past_kv[i] if past_kv is not None else None
-            h, new_kv = block(h, layer_past, use_cache)
+            h, new_kv = block(
+                h, layer_past, use_cache,
+                static_cache=static_cache, layer_idx=i,
+            )
             if use_cache:
                 new_past_kv.append(new_kv)
 
@@ -579,68 +655,114 @@ class CfDNACausalLM(nn.Module):
         bos = torch.full((B, 1), TOKEN_BOS, dtype=torch.long, device=device)
         input_ids = torch.cat([condition_tokens, bos], dim=1)
 
-        # KV cache
-        past_kv = None
+        # Total sequence length for static cache: condition tokens + BOS + generated
+        prefill_len = input_ids.shape[1]
+        total_cache_len = prefill_len + max_length + 1
 
-        # Generated tokens storage
-        generated = []
+        # Use static KV cache for faster generation (avoids torch.cat each step)
+        static_cache = StaticKVCache(
+            num_layers=self.config.num_layers,
+            batch_size=B,
+            max_seq_len=total_cache_len,
+            num_heads=self.config.num_heads,
+            head_dim=self.config.head_dim,
+            device=device,
+            dtype=next(self.parameters()).dtype,
+        )
+
+        # Pre-compute the EOS token tensor once
+        eos_tokens = torch.full((B,), TOKEN_EOS, dtype=torch.long, device=device)
+
+        # Generated tokens storage - pre-allocate for efficiency
+        generated = torch.full(
+            (B, max_length), TOKEN_PAD, dtype=torch.long, device=device
+        )
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         tokens_generated = torch.zeros(B, dtype=torch.long, device=device)
+        gen_len = 0
 
-        for step in range(max_length + 1):
-            logits, past_kv = self.forward(
-                input_ids,
-                fragment_length=fragment_length,
-                target_gc=target_gc,
-                target_ff=target_ff,
-                past_kv=past_kv,
-                use_cache=True,
-            )
+        # Prefill: process all condition tokens + BOS in one forward pass
+        logits, _ = self.forward(
+            input_ids,
+            fragment_length=fragment_length,
+            target_gc=target_gc,
+            target_ff=target_ff,
+            static_cache=static_cache,
+        )
+        static_cache.advance(prefill_len)
 
-            next_logits = logits[:, -1, :] / temperature
+        # Sample first token from prefill output
+        next_logits = logits[:, -1, :] / temperature
+        next_token = _top_p_sample(next_logits, top_p)
 
-            # Top-p (nucleus) sampling
-            sorted_logits, sorted_idx = torch.sort(next_logits, descending=True)
-            cumsum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        if enforce_length:
+            reached_length = tokens_generated >= fragment_length
+            next_token = torch.where(reached_length, eos_tokens, next_token)
 
-            sorted_mask = cumsum_probs > top_p
-            sorted_mask[..., 1:] = sorted_mask[..., :-1].clone()
-            sorted_mask[..., 0] = False
+        generated[:, 0] = next_token
+        gen_len = 1
+        tokens_generated = tokens_generated + (~finished).long()
+        finished = finished | (next_token == TOKEN_EOS)
 
-            mask = torch.zeros_like(sorted_mask)
-            mask.scatter_(1, sorted_idx, sorted_mask)
-            next_logits[mask] = float("-inf")
-
-            probs = F.softmax(next_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-            # Enforce length
-            if enforce_length:
-                reached_length = tokens_generated >= fragment_length
-                next_token = torch.where(
-                    reached_length,
-                    torch.full_like(next_token, TOKEN_EOS),
-                    next_token,
-                )
-
-            generated.append(next_token)
-            tokens_generated = tokens_generated + (~finished).long()
-
-            finished = finished | (next_token == TOKEN_EOS)
+        # Decode loop: one token at a time using static cache
+        for step in range(1, max_length + 1):
             if finished.all():
                 break
 
             input_ids = next_token.unsqueeze(-1)
 
-        result = torch.stack(generated, dim=1)
-
-        if result.shape[1] < max_length:
-            padding = torch.full(
-                (B, max_length - result.shape[1]),
-                TOKEN_PAD,
-                dtype=torch.long,
-                device=device,
+            logits, _ = self.forward(
+                input_ids,
+                fragment_length=fragment_length,
+                target_gc=target_gc,
+                target_ff=target_ff,
+                static_cache=static_cache,
             )
-            result = torch.cat([result, padding], dim=1)
+            static_cache.advance(1)
 
-        return result
+            next_logits = logits[:, -1, :] / temperature
+            next_token = _top_p_sample(next_logits, top_p)
+
+            # Enforce length
+            if enforce_length:
+                reached_length = tokens_generated >= fragment_length
+                next_token = torch.where(reached_length, eos_tokens, next_token)
+
+            generated[:, step] = next_token
+            gen_len = step + 1
+            tokens_generated = tokens_generated + (~finished).long()
+            finished = finished | (next_token == TOKEN_EOS)
+
+        return generated[:, :max_length]
+
+
+def _top_p_sample(logits: torch.Tensor, top_p: float) -> torch.Tensor:
+    """
+    Optimized top-p (nucleus) sampling.
+
+    Uses in-place operations where possible and avoids redundant allocations.
+
+    Args:
+        logits: [B, vocab_size] pre-scaled logits
+        top_p: Nucleus sampling threshold
+
+    Returns:
+        [B] sampled token indices
+    """
+    sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+    cumsum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+    # Zero out tokens beyond the top-p threshold
+    sorted_mask = cumsum_probs > top_p
+    sorted_mask[..., 1:] = sorted_mask[..., :-1].clone()
+    sorted_mask[..., 0] = False
+
+    # Apply mask in sorted space then scatter back
+    sorted_logits[sorted_mask] = float("-inf")
+
+    # Compute probabilities and sample directly from sorted distribution
+    probs = F.softmax(sorted_logits, dim=-1)
+    sampled_sorted_idx = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+    # Map back to original vocabulary indices
+    return sorted_idx.gather(1, sampled_sorted_idx.unsqueeze(-1)).squeeze(-1)

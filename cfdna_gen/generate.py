@@ -80,7 +80,9 @@ class CfDNAGenerator:
             dtype: Model dtype. 'auto' uses BF16 on CUDA, FP32 on CPU.
                 Accepts torch.bfloat16, torch.float16, torch.float32, or 'auto'.
             compile: Whether to torch.compile the generation forward pass.
-                Default: True on CUDA, False on CPU.
+                Default: False. The autoregressive token-by-token loop with
+                varying cache positions defeats graph capture, so compilation
+                adds overhead without speedup.
         """
         self.model = model
 
@@ -99,7 +101,7 @@ class CfDNAGenerator:
 
         # Resolve compile (lazy — actual compilation on first generate call)
         if compile is None:
-            self._compile = "cuda" in self.device
+            self._compile = False
         else:
             self._compile = compile
         self._compiled = False
@@ -121,7 +123,9 @@ class CfDNAGenerator:
             dtype: Model dtype. 'auto' uses BF16 on CUDA, FP32 on CPU.
                 Accepts torch.bfloat16, torch.float16, torch.float32, or 'auto'.
             compile: Whether to torch.compile the generation forward pass.
-                Default: True on CUDA, False on CPU.
+                Default: False. The autoregressive token-by-token loop with
+                varying cache positions defeats graph capture, so compilation
+                adds overhead without speedup.
 
         Returns:
             CfDNAGenerator instance with loaded model

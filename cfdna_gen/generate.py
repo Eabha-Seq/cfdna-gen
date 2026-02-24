@@ -68,6 +68,8 @@ class CfDNAGenerator:
         self,
         model: CfDNACausalLM,
         device: Optional[str] = None,
+        dtype: Union[torch.dtype, str] = "auto",
+        compile: Optional[bool] = None,
     ):
         """
         Initialize the generator with a model.
@@ -75,6 +77,10 @@ class CfDNAGenerator:
         Args:
             model: A CfDNACausalLM model instance
             device: Device to run generation on ('cpu', 'cuda', 'auto')
+            dtype: Model dtype. 'auto' uses BF16 on CUDA, FP32 on CPU.
+                Accepts torch.bfloat16, torch.float16, torch.float32, or 'auto'.
+            compile: Whether to torch.compile the generation forward pass.
+                Default: True on CUDA, False on CPU.
         """
         self.model = model
 
@@ -82,14 +88,29 @@ class CfDNAGenerator:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
 
-        self.model = self.model.to(self.device)
+        # Resolve dtype
+        if dtype == "auto":
+            self._dtype = torch.bfloat16 if "cuda" in self.device else torch.float32
+        else:
+            self._dtype = dtype
+
+        self.model = self.model.to(device=self.device, dtype=self._dtype)
         self.model.eval()
+
+        # Resolve compile (lazy — actual compilation on first generate call)
+        if compile is None:
+            self._compile = "cuda" in self.device
+        else:
+            self._compile = compile
+        self._compiled = False
 
     @classmethod
     def from_pretrained(
         cls,
         path_or_repo: Union[str, Path],
         device: Optional[str] = None,
+        dtype: Union[torch.dtype, str] = "auto",
+        compile: Optional[bool] = None,
     ) -> "CfDNAGenerator":
         """
         Load a generator from a pretrained model.
@@ -97,6 +118,10 @@ class CfDNAGenerator:
         Args:
             path_or_repo: Local path to model directory, or HuggingFace repo ID
             device: Device to run generation on ('cpu', 'cuda', 'auto')
+            dtype: Model dtype. 'auto' uses BF16 on CUDA, FP32 on CPU.
+                Accepts torch.bfloat16, torch.float16, torch.float32, or 'auto'.
+            compile: Whether to torch.compile the generation forward pass.
+                Default: True on CUDA, False on CPU.
 
         Returns:
             CfDNAGenerator instance with loaded model
@@ -107,8 +132,9 @@ class CfDNAGenerator:
             >>> # From HuggingFace Hub
             >>> generator = CfDNAGenerator.from_pretrained("eabhaseq/cfdna-gen")
         """
-        model = CfDNACausalLM.from_pretrained(path_or_repo, device=device)
-        return cls(model, device=device)
+        # Load to CPU first; __init__ handles device/dtype cast
+        model = CfDNACausalLM.from_pretrained(path_or_repo, device="cpu")
+        return cls(model, device=device, dtype=dtype, compile=compile)
 
     def generate(
         self,
@@ -169,6 +195,15 @@ class CfDNAGenerator:
             raise ValueError(
                 f"fragment_lengths has {len(lengths)} elements but n_sequences={n_sequences}"
             )
+
+        # Lazy torch.compile on first call
+        if self._compile and not self._compiled:
+            self.model._forward_with_static_cache = torch.compile(
+                self.model._forward_with_static_cache,
+                mode="default",
+                dynamic=True,
+            )
+            self._compiled = True
 
         # Generate in batches
         all_sequences = []

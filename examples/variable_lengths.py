@@ -7,6 +7,7 @@ fragment length distribution, mimicking real cfDNA data.
 """
 
 import numpy as np
+
 from cfdna_gen import CfDNAGenerator
 
 
@@ -37,7 +38,7 @@ def main():
     all_lengths = np.concatenate([fetal_lengths, maternal_lengths])
     np.random.shuffle(all_lengths)
 
-    print(f"\nFragment length statistics:")
+    print("\nFragment length statistics:")
     print(f"  Mean: {all_lengths.mean():.1f}bp")
     print(f"  Std:  {all_lengths.std():.1f}bp")
     print(f"  Min:  {all_lengths.min()}bp")
@@ -55,7 +56,7 @@ def main():
 
     # Verify output lengths match input
     actual_lengths = [len(s) for s in sequences]
-    print(f"\nOutput length statistics:")
+    print("\nOutput length statistics:")
     print(f"  Mean: {np.mean(actual_lengths):.1f}bp")
     print(f"  Std:  {np.std(actual_lengths):.1f}bp")
 

@@ -15,7 +15,7 @@ Vocabulary Layout (64 tokens total):
     47-63: Fetal fraction bin tokens (17 bins covering 0.0-0.40)
 """
 
-from typing import List, Sequence
+from collections.abc import Sequence
 
 __all__ = [
     "TOKEN_A",
@@ -31,6 +31,9 @@ __all__ = [
     "get_len_bin_token",
     "get_gc_bin_token",
     "get_ff_bin_token",
+    "LEN_TOKEN_START",
+    "GC_TOKEN_START",
+    "FF_TOKEN_START",
 ]
 
 # =============================================================================
@@ -70,7 +73,7 @@ _TOKEN_TO_NUCLEOTIDE = {TOKEN_A: "A", TOKEN_C: "C", TOKEN_G: "G", TOKEN_T: "T"}
 # =============================================================================
 
 
-def sequence_to_tokens(sequence: str) -> List[int]:
+def sequence_to_tokens(sequence: str) -> list[int]:
     """
     Convert a DNA sequence string to a list of token IDs.
 

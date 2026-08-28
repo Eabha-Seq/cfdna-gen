@@ -13,7 +13,10 @@ from cfdna_gen import CfDNAGenerator
 
 def main():
     print("Loading model...")
-    generator = CfDNAGenerator.from_pretrained("eabhaseq/cfdna-gen")
+    generator = CfDNAGenerator.from_pretrained(
+        "eabhaseq/cfdna-gen",
+        use_compile=True,
+    )
 
     # Generate different batch sizes
     for n_sequences in [100, 1000, 10000]:
@@ -26,7 +29,7 @@ def main():
             fragment_lengths=165,
             target_gc=0.42,
             target_ff=0.10,
-            batch_size=256,
+            batch_size=512,
             show_progress=True,
         )
         elapsed = time.time() - start_time
@@ -51,7 +54,7 @@ def main():
         output_path="/tmp/synthetic_cfdna.fastq.gz",
         target_gc=0.42,
         target_ff=0.10,
-        batch_size=256,
+        batch_size=512,
         show_progress=True,
     )
     elapsed = time.time() - start_time

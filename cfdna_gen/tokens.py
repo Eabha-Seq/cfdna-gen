@@ -31,6 +31,9 @@ __all__ = [
     "get_len_bin_token",
     "get_gc_bin_token",
     "get_ff_bin_token",
+    "LEN_TOKEN_START",
+    "GC_TOKEN_START",
+    "FF_TOKEN_START",
 ]
 
 # =============================================================================

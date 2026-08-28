@@ -132,10 +132,29 @@ sequences = generator.generate(
 sequences = generator.generate(
     n_sequences=100000,
     fragment_lengths=167,
-    batch_size=256,
+    batch_size=512,
     show_progress=True,
 )
 ```
+
+### Faster GPU generation
+
+On CUDA, generation defaults to half precision (bfloat16 when supported). That does not change temperature, top-p, or length/GC/FF conditioning. For more throughput on long jobs, compile the model and keep the batch large:
+
+```python
+generator = CfDNAGenerator.from_pretrained(
+    "eabhaseq/cfdna-gen",
+    use_compile=True,  # first batch is slower
+)
+sequences = generator.generate(
+    n_sequences=1_000_000,
+    fragment_lengths=165,
+    batch_size=512,  # 1024 is fine on 24 GB+ in half precision
+    show_progress=True,
+)
+```
+
+Pass `use_half=False` to force FP32. Lower `batch_size` (e.g. 128) on GPUs with less than ~8 GB.
 
 ## Model Architecture
 

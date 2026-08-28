@@ -15,7 +15,7 @@ Example:
     ... )
 """
 
-from .model import CfDNACausalLM, CfDNAConfig
+from .model import CfDNACausalLM, CfDNAConfig, StaticKVCache
 from .generate import CfDNAGenerator
 from .tokens import (
     TOKEN_A,
@@ -42,6 +42,7 @@ __all__ = [
     "CfDNAGenerator",
     "CfDNACausalLM",
     "CfDNAConfig",
+    "StaticKVCache",
     # Tokens
     "TOKEN_A",
     "TOKEN_C",

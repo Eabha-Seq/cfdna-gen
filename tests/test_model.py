@@ -6,8 +6,8 @@ import json
 import tempfile
 from pathlib import Path
 
-from cfdna_gen.model import CfDNAConfig, CfDNACausalLM
-from cfdna_gen.tokens import VOCAB_SIZE, TOKEN_BOS
+from cfdna_gen.model import CfDNAConfig, CfDNACausalLM, StaticKVCache
+from cfdna_gen.tokens import VOCAB_SIZE, TOKEN_EOS
 
 
 class TestCfDNAConfig:
@@ -166,6 +166,63 @@ class TestCfDNACausalLM:
 
         assert generated.shape[0] == batch_size
         assert generated.shape[1] <= 30
+        assert generated.shape[1] == 30
+
+    def test_generate_enforces_length(self, small_model):
+        """EOS is forced at the target fragment length."""
+        fragment_length = torch.tensor([8, 12])
+        condition_tokens = torch.tensor([[7], [7]])
+        generated = small_model.generate(
+            condition_tokens=condition_tokens,
+            fragment_length=fragment_length,
+            max_length=20,
+            temperature=1.0,
+            top_p=0.9,
+            enforce_length=True,
+        )
+        for i, target in enumerate(fragment_length.tolist()):
+            row = generated[i]
+            eos_at = (row == TOKEN_EOS).nonzero(as_tuple=False)
+            assert len(eos_at) > 0
+            assert int(eos_at[0]) <= target
+
+    def test_static_kv_cache_update(self):
+        cache = StaticKVCache(
+            num_layers=2,
+            batch_size=2,
+            max_seq_len=8,
+            num_heads=4,
+            head_dim=16,
+            device=torch.device("cpu"),
+        )
+        k = torch.randn(2, 4, 3, 16)
+        v = torch.randn(2, 4, 3, 16)
+        k_out, v_out = cache.update(0, k, v)
+        assert k_out.shape == (2, 4, 3, 16)
+        assert torch.equal(k_out, k)
+        cache.advance(3)
+        assert cache.seq_len == 3
+        k2 = torch.randn(2, 4, 1, 16)
+        v2 = torch.randn(2, 4, 1, 16)
+        k_out, _ = cache.update(0, k2, v2)
+        assert k_out.shape == (2, 4, 4, 16)
+
+    def test_half_embeddings(self, small_config):
+        """Condition embeddings accept half-precision weights."""
+        model = CfDNACausalLM(small_config).half()
+        batch_size = 2
+        input_ids = torch.randint(0, VOCAB_SIZE, (batch_size, 8))
+        fragment_length = torch.tensor([20, 25])
+        target_gc = torch.tensor([0.42, 0.40])
+        target_ff = torch.tensor([0.10, 0.08])
+        logits, _ = model(
+            input_ids,
+            fragment_length=fragment_length,
+            target_gc=target_gc,
+            target_ff=target_ff,
+        )
+        assert logits.dtype == torch.float16
+        assert logits.shape == (batch_size, 8, VOCAB_SIZE)
 
     def test_save_load(self, small_model):
         """Test model save and load."""

@@ -6,8 +6,9 @@ import numpy as np
 import tempfile
 from pathlib import Path
 
-from cfdna_gen.generate import CfDNAGenerator
+from cfdna_gen.generate import CfDNAGenerator, batch_tokens_to_sequences
 from cfdna_gen.model import CfDNACausalLM, CfDNAConfig
+from cfdna_gen.tokens import TOKEN_EOS, TOKEN_PAD, tokens_to_sequence
 
 
 class TestCfDNAGenerator:
@@ -25,12 +26,22 @@ class TestCfDNAGenerator:
             dropout=0.0,
         )
         model = CfDNACausalLM(config)
-        return CfDNAGenerator(model, device="cpu")
+        return CfDNAGenerator(model, device="cpu", use_half=False, use_compile=False)
 
     def test_generator_creation(self, small_generator):
         """Test generator can be created."""
         assert small_generator is not None
         assert small_generator.device == "cpu"
+        assert small_generator._autocast_dtype is None
+
+    def test_use_half_ignored_on_cpu(self, small_generator):
+        """Half precision is a no-op on CPU."""
+        config = small_generator.model.config
+        model = CfDNACausalLM(config)
+        generator = CfDNAGenerator(model, device="cpu", use_half=True)
+        assert generator._autocast_dtype is None
+        dtype = next(generator.model.parameters()).dtype
+        assert dtype == torch.float32
 
     def test_generate_basic(self, small_generator):
         """Test basic sequence generation."""
@@ -194,6 +205,28 @@ class TestCfDNAGenerator:
             assert len(lines) == 40
 
 
+class TestBatchTokensToSequences:
+    """Test vectorized token-to-sequence conversion."""
+
+    def test_matches_tokens_to_sequence(self):
+        tokens = torch.tensor([
+            [0, 1, 2, 3, TOKEN_EOS, TOKEN_PAD],
+            [3, 3, 0, TOKEN_PAD, TOKEN_PAD, TOKEN_PAD],
+            [1, TOKEN_EOS, 0, 0, 0, 0],
+        ])
+        sequences = batch_tokens_to_sequences(tokens)
+        expected = [
+            tokens_to_sequence([0, 1, 2, 3]),
+            tokens_to_sequence([3, 3, 0]),
+            tokens_to_sequence([1]),
+        ]
+        assert sequences == expected
+
+    def test_empty_after_immediate_eos(self):
+        tokens = torch.tensor([[TOKEN_EOS, 0, 1]])
+        assert batch_tokens_to_sequences(tokens) == [""]
+
+
 class TestGeneratorFromPretrained:
     """Test loading generator from pretrained models."""
 
@@ -215,7 +248,9 @@ class TestGeneratorFromPretrained:
             model.save_pretrained(path)
 
             # Load using from_pretrained
-            generator = CfDNAGenerator.from_pretrained(path, device="cpu")
+            generator = CfDNAGenerator.from_pretrained(
+                path, device="cpu", use_half=False
+            )
 
             # Should work
             sequences = generator.generate(

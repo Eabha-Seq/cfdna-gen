@@ -190,19 +190,17 @@ class CfDNAGenerator:
             ...     fragment_lengths=lengths,
             ... )
         """
-        # Handle fragment lengths
+        # Handle fragment lengths. Always go through asarray so mypy sees one ndarray type.
         if isinstance(fragment_lengths, int):
-            lengths = np.full(n_sequences, fragment_lengths)
-        elif isinstance(fragment_lengths, list):
-            lengths = np.array(fragment_lengths)
-            if len(lengths) == 1:
-                lengths = np.full(n_sequences, lengths[0])
+            lengths = np.asarray([fragment_lengths] * n_sequences, dtype=np.int64)
         else:
-            lengths = np.asarray(fragment_lengths)
+            lengths = np.asarray(fragment_lengths, dtype=np.int64).reshape(-1)
+            if lengths.size == 1:
+                lengths = np.full(n_sequences, int(lengths[0]), dtype=np.int64)
 
-        if len(lengths) != n_sequences:
+        if lengths.size != n_sequences:
             raise ValueError(
-                f"fragment_lengths has {len(lengths)} elements but n_sequences={n_sequences}"
+                f"fragment_lengths has {lengths.size} elements but n_sequences={n_sequences}"
             )
 
         # Generate in batches
@@ -246,8 +244,7 @@ class CfDNAGenerator:
         device = self.device
 
         condition_cols = []
-        lengths_np = batch_lengths.astype(np.int64)
-        len_bins = np.clip((lengths_np - 50) // 10, 0, 19) + LEN_TOKEN_START
+        len_bins = np.clip((batch_lengths.astype(np.int64) - 50) // 10, 0, 19) + LEN_TOKEN_START
         condition_cols.append(torch.tensor(len_bins, dtype=torch.long, device=device))
 
         if target_gc is not None:

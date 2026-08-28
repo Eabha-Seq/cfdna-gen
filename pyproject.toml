@@ -87,6 +87,12 @@ warn_unused_ignores = true
 ignore_missing_imports = true
 strict = false
 
+# Latest numpy stubs use PEP 695 `type` aliases. mypy with python_version=3.10
+# cannot parse those files, which breaks the 3.12 CI job.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"

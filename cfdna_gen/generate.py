@@ -16,7 +16,6 @@ Example:
 """
 
 from pathlib import Path
-from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -66,9 +65,9 @@ class CfDNAGenerator:
     def __init__(
         self,
         model: CfDNACausalLM,
-        device: Optional[str] = None,
+        device: str | None = None,
         use_compile: bool = False,
-        use_half: Optional[bool] = None,
+        use_half: bool | None = None,
     ):
         """
         Initialize the generator with a model.
@@ -104,7 +103,7 @@ class CfDNAGenerator:
         self._compiled = False
         if use_compile:
             try:
-                self.model = torch.compile(self.model, mode="default")
+                self.model = torch.compile(self.model, mode="default")  # type: ignore[assignment]
                 self._compiled = True
             except Exception:
                 pass
@@ -112,10 +111,10 @@ class CfDNAGenerator:
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo: Union[str, Path],
-        device: Optional[str] = None,
+        path_or_repo: str | Path,
+        device: str | None = None,
         use_compile: bool = False,
-        use_half: Optional[bool] = None,
+        use_half: bool | None = None,
     ) -> "CfDNAGenerator":
         """
         Load a generator from a pretrained model.
@@ -148,14 +147,14 @@ class CfDNAGenerator:
     def generate(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         temperature: float = 0.95,
         top_p: float = 0.96,
         batch_size: int = 512,
         show_progress: bool = False,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Generate synthetic cfDNA sequences.
 
@@ -237,11 +236,11 @@ class CfDNAGenerator:
     def _generate_batch(
         self,
         batch_lengths: np.ndarray,
-        target_gc: Optional[float],
-        target_ff: Optional[float],
+        target_gc: float | None,
+        target_ff: float | None,
         temperature: float,
         top_p: float,
-    ) -> List[str]:
+    ) -> list[str]:
         """Generate a batch of sequences."""
         batch_size = len(batch_lengths)
         device = self.device
@@ -290,11 +289,11 @@ class CfDNAGenerator:
     def generate_with_metadata(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         **kwargs,
-    ) -> List[dict]:
+    ) -> list[dict]:
         """
         Generate sequences with metadata.
 
@@ -344,10 +343,10 @@ class CfDNAGenerator:
     def generate_fastq(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        output_path: Union[str, Path],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        output_path: str | Path,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         quality_score: int = 30,
         **kwargs,
     ) -> int:
@@ -391,10 +390,10 @@ class CfDNAGenerator:
 
         with open_fn(output_path, mode) as f:
             for i, seq in enumerate(sequences):
-                f.write(f"@synthetic_cfdna_{i:08d}\n")
-                f.write(f"{seq}\n")
-                f.write("+\n")
-                f.write(f"{quality_char * len(seq)}\n")
+                f.write(f"@synthetic_cfdna_{i:08d}\n")  # type: ignore[arg-type]
+                f.write(f"{seq}\n")  # type: ignore[arg-type]
+                f.write("+\n")  # type: ignore[arg-type]
+                f.write(f"{quality_char * len(seq)}\n")  # type: ignore[arg-type]
 
         return len(sequences)
 
@@ -403,7 +402,7 @@ class CfDNAGenerator:
 _TOKEN_TO_BYTE = np.array([ord("A"), ord("C"), ord("G"), ord("T")], dtype=np.uint8)
 
 
-def batch_tokens_to_sequences(generated_tokens: torch.Tensor) -> List[str]:
+def batch_tokens_to_sequences(generated_tokens: torch.Tensor) -> list[str]:
     """
     Convert a [B, L] token tensor to DNA strings.
 
@@ -414,7 +413,7 @@ def batch_tokens_to_sequences(generated_tokens: torch.Tensor) -> List[str]:
     has_stop = stop.any(axis=1)
     stop_idx = np.where(has_stop, stop.argmax(axis=1), tokens_np.shape[1])
 
-    sequences: List[str] = []
+    sequences: list[str] = []
     for i, row in enumerate(tokens_np):
         valid = row[: stop_idx[i]]
         nuc = valid[(valid >= 0) & (valid <= 3)]

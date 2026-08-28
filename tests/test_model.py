@@ -1,13 +1,13 @@
 """Tests for the CfDNACausalLM model."""
 
-import pytest
-import torch
-import json
 import tempfile
 from pathlib import Path
 
-from cfdna_gen.model import CfDNAConfig, CfDNACausalLM, StaticKVCache
-from cfdna_gen.tokens import VOCAB_SIZE, TOKEN_EOS
+import pytest
+import torch
+
+from cfdna_gen.model import CfDNACausalLM, CfDNAConfig, StaticKVCache
+from cfdna_gen.tokens import TOKEN_EOS, VOCAB_SIZE
 
 
 class TestCfDNAConfig:

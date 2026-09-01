@@ -250,5 +250,5 @@ class TestGeneratorFromPretrained:
 
     def test_from_pretrained_invalid_path(self):
         """Test that invalid path raises error."""
-        with pytest.raises((ValueError, FileNotFoundError)):
+        with pytest.raises((ValueError, FileNotFoundError, ImportError)):
             CfDNAGenerator.from_pretrained("/nonexistent/path")

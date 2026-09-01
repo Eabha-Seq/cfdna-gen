@@ -1,13 +1,13 @@
 """Tests for the CfDNACausalLM model."""
 
-import pytest
-import torch
-import json
 import tempfile
 from pathlib import Path
 
-from cfdna_gen.model import CfDNAConfig, CfDNACausalLM
-from cfdna_gen.tokens import VOCAB_SIZE, TOKEN_BOS
+import pytest
+import torch
+
+from cfdna_gen.model import CfDNACausalLM, CfDNAConfig
+from cfdna_gen.tokens import VOCAB_SIZE
 
 
 class TestCfDNAConfig:
@@ -165,7 +165,7 @@ class TestCfDNACausalLM:
         )
 
         assert generated.shape[0] == batch_size
-        assert generated.shape[1] <= 30
+        assert generated.shape[1] == 30
 
     def test_save_load(self, small_model):
         """Test model save and load."""

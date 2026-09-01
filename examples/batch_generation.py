@@ -7,7 +7,9 @@ efficiently using batching and shows performance metrics.
 """
 
 import time
+
 import numpy as np
+
 from cfdna_gen import CfDNAGenerator
 
 
@@ -26,7 +28,7 @@ def main():
             fragment_lengths=165,
             target_gc=0.42,
             target_ff=0.10,
-            batch_size=256,
+            batch_size=512,
             show_progress=True,
         )
         elapsed = time.time() - start_time
@@ -35,7 +37,7 @@ def main():
         lengths = [len(s) for s in sequences]
         gc_contents = [(s.count('G') + s.count('C')) / len(s) for s in sequences]
 
-        print(f"\nResults:")
+        print("\nResults:")
         print(f"  Time: {elapsed:.2f}s ({n_sequences/elapsed:.0f} seq/s)")
         print(f"  Length: mean={np.mean(lengths):.1f}, std={np.std(lengths):.1f}")
         print(f"  GC: mean={np.mean(gc_contents):.3f}, std={np.std(gc_contents):.3f}")
@@ -51,15 +53,15 @@ def main():
         output_path="/tmp/synthetic_cfdna.fastq.gz",
         target_gc=0.42,
         target_ff=0.10,
-        batch_size=256,
+        batch_size=512,
         show_progress=True,
     )
     elapsed = time.time() - start_time
 
-    print(f"\nFASTQ generation:")
+    print("\nFASTQ generation:")
     print(f"  Sequences: {n_written:,}")
     print(f"  Time: {elapsed:.2f}s")
-    print(f"  Output: /tmp/synthetic_cfdna.fastq.gz")
+    print("  Output: /tmp/synthetic_cfdna.fastq.gz")
 
 
 if __name__ == "__main__":

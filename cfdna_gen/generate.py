@@ -16,19 +16,17 @@ Example:
 """
 
 from pathlib import Path
-from typing import List, Optional, Union
 
-import torch
 import numpy as np
+import torch
 
-from .model import CfDNACausalLM, CfDNAConfig
+from .model import CfDNACausalLM
 from .tokens import (
-    get_len_bin_token,
-    get_gc_bin_token,
-    get_ff_bin_token,
-    tokens_to_sequence,
     TOKEN_EOS,
     TOKEN_PAD,
+    get_ff_bin_token,
+    get_gc_bin_token,
+    get_len_bin_token,
 )
 
 __all__ = ["CfDNAGenerator"]
@@ -67,7 +65,9 @@ class CfDNAGenerator:
     def __init__(
         self,
         model: CfDNACausalLM,
-        device: Optional[str] = None,
+        device: str | None = None,
+        dtype: torch.dtype | str = "auto",
+        compile: bool | None = None,
     ):
         """
         Initialize the generator with a model.
@@ -75,6 +75,12 @@ class CfDNAGenerator:
         Args:
             model: A CfDNACausalLM model instance
             device: Device to run generation on ('cpu', 'cuda', 'auto')
+            dtype: Model dtype. 'auto' uses BF16 on CUDA, FP32 on CPU.
+                Accepts torch.bfloat16, torch.float16, torch.float32, or 'auto'.
+            compile: Whether to torch.compile the generation forward pass.
+                Default: False. The autoregressive token-by-token loop with
+                varying cache positions defeats graph capture, so compilation
+                adds overhead without speedup.
         """
         self.model = model
 
@@ -82,14 +88,29 @@ class CfDNAGenerator:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
 
-        self.model = self.model.to(self.device)
+        self._dtype: torch.dtype
+        if dtype == "auto":
+            self._dtype = torch.bfloat16 if "cuda" in self.device else torch.float32
+        else:
+            self._dtype = dtype  # type: ignore[assignment]
+
+        self.model = self.model.to(device=self.device, dtype=self._dtype)
         self.model.eval()
+
+        # Resolve compile (lazy — actual compilation on first generate call)
+        if compile is None:
+            self._compile = False
+        else:
+            self._compile = compile
+        self._compiled = False
 
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo: Union[str, Path],
-        device: Optional[str] = None,
+        path_or_repo: str | Path,
+        device: str | None = None,
+        dtype: torch.dtype | str = "auto",
+        compile: bool | None = None,
     ) -> "CfDNAGenerator":
         """
         Load a generator from a pretrained model.
@@ -97,6 +118,12 @@ class CfDNAGenerator:
         Args:
             path_or_repo: Local path to model directory, or HuggingFace repo ID
             device: Device to run generation on ('cpu', 'cuda', 'auto')
+            dtype: Model dtype. 'auto' uses BF16 on CUDA, FP32 on CPU.
+                Accepts torch.bfloat16, torch.float16, torch.float32, or 'auto'.
+            compile: Whether to torch.compile the generation forward pass.
+                Default: False. The autoregressive token-by-token loop with
+                varying cache positions defeats graph capture, so compilation
+                adds overhead without speedup.
 
         Returns:
             CfDNAGenerator instance with loaded model
@@ -107,20 +134,21 @@ class CfDNAGenerator:
             >>> # From HuggingFace Hub
             >>> generator = CfDNAGenerator.from_pretrained("eabhaseq/cfdna-gen")
         """
-        model = CfDNACausalLM.from_pretrained(path_or_repo, device=device)
-        return cls(model, device=device)
+        # Load to CPU first; __init__ handles device/dtype cast
+        model = CfDNACausalLM.from_pretrained(path_or_repo, device="cpu")
+        return cls(model, device=device, dtype=dtype, compile=compile)
 
     def generate(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         temperature: float = 0.95,
         top_p: float = 0.96,
-        batch_size: int = 128,
+        batch_size: int = 512,
         show_progress: bool = False,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Generate synthetic cfDNA sequences.
 
@@ -132,7 +160,8 @@ class CfDNAGenerator:
             target_ff: Target fetal fraction (0.0-0.5). Default is 0.10 (10%).
             temperature: Sampling temperature. Higher = more random. Default 0.95.
             top_p: Nucleus sampling threshold. Default 0.96.
-            batch_size: Number of sequences to generate per batch. Default 128.
+            batch_size: Sequences per forward-batch. Default 512. Pass 128
+                on GPUs with less than ~8 GB.
             show_progress: Whether to show a progress bar. Default False.
 
         Returns:
@@ -155,20 +184,26 @@ class CfDNAGenerator:
             ...     fragment_lengths=lengths,
             ... )
         """
-        # Handle fragment lengths
         if isinstance(fragment_lengths, int):
-            lengths = np.full(n_sequences, fragment_lengths)
-        elif isinstance(fragment_lengths, list):
-            lengths = np.array(fragment_lengths)
-            if len(lengths) == 1:
-                lengths = np.full(n_sequences, lengths[0])
+            lengths = np.asarray([fragment_lengths] * n_sequences, dtype=np.int64)
         else:
-            lengths = np.asarray(fragment_lengths)
+            lengths = np.asarray(fragment_lengths, dtype=np.int64).reshape(-1)
+            if lengths.size == 1:
+                lengths = np.full(n_sequences, int(lengths[0]), dtype=np.int64)
 
-        if len(lengths) != n_sequences:
+        if lengths.size != n_sequences:
             raise ValueError(
-                f"fragment_lengths has {len(lengths)} elements but n_sequences={n_sequences}"
+                f"fragment_lengths has {lengths.size} elements but n_sequences={n_sequences}"
             )
+
+        # Lazy torch.compile on first call
+        if self._compile and not self._compiled:
+            self.model._forward_with_static_cache = torch.compile(  # type: ignore[method-assign]
+                self.model._forward_with_static_cache,
+                mode="default",
+                dynamic=True,
+            )
+            self._compiled = True
 
         # Generate in batches
         all_sequences = []
@@ -201,11 +236,11 @@ class CfDNAGenerator:
     def _generate_batch(
         self,
         batch_lengths: np.ndarray,
-        target_gc: Optional[float],
-        target_ff: Optional[float],
+        target_gc: float | None,
+        target_ff: float | None,
         temperature: float,
         top_p: float,
-    ) -> List[str]:
+    ) -> list[str]:
         """Generate a batch of sequences."""
         batch_size = len(batch_lengths)
         device = self.device
@@ -228,8 +263,7 @@ class CfDNAGenerator:
             t + [0] * (max_cond_len - len(t)) for t in condition_tokens
         ]
 
-        # Convert to tensors
-        condition_tokens = torch.tensor(condition_tokens, dtype=torch.long, device=device)
+        condition_token_ids = torch.tensor(condition_tokens, dtype=torch.long, device=device)
         fragment_lengths = torch.tensor(batch_lengths, dtype=torch.long, device=device)
 
         target_gc_tensor = None
@@ -239,11 +273,10 @@ class CfDNAGenerator:
         if target_ff is not None:
             target_ff_tensor = torch.full((batch_size,), target_ff, device=device)
 
-        # Generate
         max_length = int(batch_lengths.max()) + 10
-        with torch.no_grad():
+        with torch.inference_mode():
             generated_tokens = self.model.generate(
-                condition_tokens=condition_tokens,
+                condition_tokens=condition_token_ids,
                 fragment_length=fragment_lengths,
                 target_gc=target_gc_tensor,
                 target_ff=target_ff_tensor,
@@ -253,28 +286,16 @@ class CfDNAGenerator:
                 enforce_length=True,
             )
 
-        # Convert to sequences
-        sequences = []
-        for i, tokens in enumerate(generated_tokens):
-            # Remove EOS and PAD tokens
-            seq_tokens = []
-            for t in tokens.cpu().numpy():
-                if t == TOKEN_EOS or t == TOKEN_PAD:
-                    break
-                seq_tokens.append(t)
-            seq = tokens_to_sequence(seq_tokens)
-            sequences.append(seq)
-
-        return sequences
+        return batch_tokens_to_sequences(generated_tokens)
 
     def generate_with_metadata(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         **kwargs,
-    ) -> List[dict]:
+    ) -> list[dict]:
         """
         Generate sequences with metadata.
 
@@ -324,10 +345,10 @@ class CfDNAGenerator:
     def generate_fastq(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        output_path: Union[str, Path],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        output_path: str | Path,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         quality_score: int = 30,
         **kwargs,
     ) -> int:
@@ -371,9 +392,36 @@ class CfDNAGenerator:
 
         with open_fn(output_path, mode) as f:
             for i, seq in enumerate(sequences):
-                f.write(f"@synthetic_cfdna_{i:08d}\n")
-                f.write(f"{seq}\n")
-                f.write("+\n")
-                f.write(f"{quality_char * len(seq)}\n")
+                f.write(f"@synthetic_cfdna_{i:08d}\n")  # type: ignore[arg-type]
+                f.write(f"{seq}\n")  # type: ignore[arg-type]
+                f.write("+\n")  # type: ignore[arg-type]
+                f.write(f"{quality_char * len(seq)}\n")  # type: ignore[arg-type]
 
         return len(sequences)
+
+
+# Token 0-3 → ASCII A/C/G/T. One byte lookup so a row becomes one decode.
+_TOKEN_TO_BYTE = np.array([ord("A"), ord("C"), ord("G"), ord("T")], dtype=np.uint8)
+
+
+def batch_tokens_to_sequences(generated_tokens: torch.Tensor) -> list[str]:
+    """Convert a [B, L] token tensor to DNA strings.
+
+    One host copy for the whole batch. Stops at the first EOS or PAD per row,
+    then keeps nucleotide tokens (0-3) only — same result as the old
+    per-row ``tokens_to_sequence`` loop.
+    """
+    tokens_np = generated_tokens.detach().to(device="cpu", dtype=torch.int64).numpy()
+    stop = (tokens_np == TOKEN_EOS) | (tokens_np == TOKEN_PAD)
+    has_stop = stop.any(axis=1)
+    stop_idx = np.where(has_stop, stop.argmax(axis=1), tokens_np.shape[1])
+
+    sequences: list[str] = []
+    for i, row in enumerate(tokens_np):
+        valid = row[: stop_idx[i]]
+        nuc = valid[(valid >= 0) & (valid <= 3)]
+        if nuc.size == 0:
+            sequences.append("")
+        else:
+            sequences.append(_TOKEN_TO_BYTE[nuc].tobytes().decode("ascii"))
+    return sequences

@@ -19,16 +19,14 @@ Example:
 """
 
 import json
-import math
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tokens import VOCAB_SIZE, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD
+from .tokens import TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, VOCAB_SIZE
 
 __all__ = ["CfDNAConfig", "CfDNACausalLM"]
 
@@ -74,14 +72,14 @@ class CfDNAConfig:
         """Create config from dictionary."""
         return cls(**{k: v for k, v in d.items() if k != "head_dim"})
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         """Save config to JSON file."""
         path = Path(path)
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
 
     @classmethod
-    def load(cls, path: Union[str, Path]) -> "CfDNAConfig":
+    def load(cls, path: str | Path) -> "CfDNAConfig":
         """Load config from JSON file."""
         path = Path(path)
         with open(path) as f:
@@ -116,10 +114,10 @@ class RotaryPositionEmbedding(nn.Module):
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
         self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
-    def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         return (
-            self.cos_cached[:seq_len].to(x.dtype),
-            self.sin_cached[:seq_len].to(x.dtype),
+            self.cos_cached[:seq_len].to(x.dtype),  # type: ignore[index]
+            self.sin_cached[:seq_len].to(x.dtype),  # type: ignore[index]
         )
 
 
@@ -131,7 +129,7 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 def apply_rotary_pos_emb(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply rotary position embeddings to Q and K."""
     q_embed = q * cos + rotate_half(q) * sin
     k_embed = k * cos + rotate_half(k) * sin
@@ -149,7 +147,7 @@ class SwiGLU(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))  # type: ignore[no-any-return]
 
 
 class CausalSelfAttention(nn.Module):
@@ -174,9 +172,9 @@ class CausalSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, L, D = x.shape
 
         q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
@@ -219,6 +217,57 @@ class CausalSelfAttention(nn.Module):
 
         return out, new_kv
 
+    def _attention_with_static_cache(
+        self,
+        x: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        pos: int,
+    ) -> torch.Tensor:
+        """Attention with pre-allocated static KV cache (inference only).
+
+        Args:
+            x: [B, L, D] input hidden states (already normed)
+            cache_k: [B, num_heads, max_len, head_dim] pre-allocated key cache
+            cache_v: [B, num_heads, max_len, head_dim] pre-allocated value cache
+            pos: Current write position in the cache
+
+        Returns:
+            [B, L, D] attention output
+        """
+        B, L, D = x.shape
+
+        q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # RoPE at correct absolute positions
+        total_len = pos + L
+        cos, sin = self.rotary_emb(q, total_len)
+        cos = cos[pos:total_len]
+        sin = sin[pos:total_len]
+        q, k = apply_rotary_pos_emb(
+            q, k, cos.unsqueeze(0).unsqueeze(0), sin.unsqueeze(0).unsqueeze(0)
+        )
+
+        # Write to static cache (in-place)
+        cache_k[:, :, pos:total_len, :] = k
+        cache_v[:, :, pos:total_len, :] = v
+
+        # Read full cache up to current position
+        k_full = cache_k[:, :, :total_len, :]
+        v_full = cache_v[:, :, :total_len, :]
+
+        # SDPA — no dropout during inference
+        if L == 1 and pos > 0:
+            out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=False)
+        else:
+            out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=True)
+
+        out = out.transpose(1, 2).contiguous().view(B, L, D)
+        out = self.o_proj(out)
+        return out  # type: ignore[no-any-return]
+
 
 class TransformerBlock(nn.Module):
     """Single transformer block with pre-norm."""
@@ -233,9 +282,9 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         attn_out, new_kv = self.attn(self.attn_norm(x), past_kv, use_cache)
         x = x + attn_out
         x = x + self.ffn(self.ffn_norm(x))
@@ -252,7 +301,7 @@ class LengthEmbedding(nn.Module):
 
     def forward(self, length: torch.Tensor) -> torch.Tensor:
         normalized = length.float() / self.max_length
-        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)
+        return self.proj(normalized.unsqueeze(-1).to(self.proj.weight.dtype)).unsqueeze(1)  # type: ignore[no-any-return]
 
 
 class GCEmbedding(nn.Module):
@@ -268,7 +317,7 @@ class GCEmbedding(nn.Module):
 
     def forward(self, gc: torch.Tensor) -> torch.Tensor:
         normalized = (gc.float() - 0.42) * 5.0
-        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)
+        return self.proj(normalized.unsqueeze(-1).to(self.proj[0].weight.dtype)).unsqueeze(1)  # type: ignore[no-any-return,arg-type]
 
 
 class FFEmbedding(nn.Module):
@@ -284,7 +333,7 @@ class FFEmbedding(nn.Module):
 
     def forward(self, ff: torch.Tensor) -> torch.Tensor:
         normalized = (ff.float() - 0.10) * 10.0
-        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)
+        return self.proj(normalized.unsqueeze(-1).to(self.proj[0].weight.dtype)).unsqueeze(1)  # type: ignore[no-any-return,arg-type]
 
 
 class CfDNACausalLM(nn.Module):
@@ -351,8 +400,8 @@ class CfDNACausalLM(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo: Union[str, Path],
-        device: Optional[str] = None,
+        path_or_repo: str | Path,
+        device: str | None = None,
         **kwargs,
     ) -> "CfDNACausalLM":
         """
@@ -384,16 +433,12 @@ class CfDNACausalLM(nn.Module):
                 raise ImportError(
                     "huggingface_hub is required to download models. "
                     "Install with: pip install huggingface-hub"
-                )
+                ) from None
             except Exception as e:
-                raise ValueError(f"Could not find model at {path_or_repo}: {e}")
+                raise ValueError(f"Could not find model at {path_or_repo}: {e}") from e
 
-        # Load config
         config_path = path / "config.json"
-        if config_path.exists():
-            config = CfDNAConfig.load(config_path)
-        else:
-            config = CfDNAConfig(**kwargs)
+        config = CfDNAConfig.load(config_path) if config_path.exists() else CfDNAConfig(**kwargs)
 
         # Create model
         model = cls(config)
@@ -419,7 +464,7 @@ class CfDNACausalLM(nn.Module):
                 raise ImportError(
                     "safetensors is required to load model weights. "
                     "Install with: pip install safetensors"
-                )
+                ) from None
         else:
             # Try PyTorch format
             pt_path = path / "model.pt"
@@ -465,7 +510,7 @@ class CfDNACausalLM(nn.Module):
 
         return model
 
-    def save_pretrained(self, path: Union[str, Path]) -> None:
+    def save_pretrained(self, path: str | Path) -> None:
         """
         Save model and config to a directory.
 
@@ -486,7 +531,7 @@ class CfDNACausalLM(nn.Module):
             from safetensors.torch import save_model
 
             # Use save_model to handle tied weights properly
-            save_model(self, path / "model.safetensors")
+            save_model(self, str(path / "model.safetensors"))
         except ImportError:
             # Fallback to PyTorch format
             torch.save({"model_state_dict": self.state_dict()}, path / "model.pt")
@@ -494,12 +539,12 @@ class CfDNACausalLM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        fragment_length: Optional[torch.Tensor] = None,
-        target_gc: Optional[torch.Tensor] = None,
-        target_ff: Optional[torch.Tensor] = None,
-        past_kv: Optional[list] = None,
+        fragment_length: torch.Tensor | None = None,
+        target_gc: torch.Tensor | None = None,
+        target_ff: torch.Tensor | None = None,
+        past_kv: list | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[list]]:
+    ) -> tuple[torch.Tensor, list | None]:
         """
         Forward pass.
 
@@ -531,11 +576,11 @@ class CfDNACausalLM(nn.Module):
         h = self.drop(h)
 
         # Transformer blocks
-        new_past_kv = [] if use_cache else None
+        new_past_kv: list | None = [] if use_cache else None
         for i, block in enumerate(self.blocks):
             layer_past = past_kv[i] if past_kv is not None else None
             h, new_kv = block(h, layer_past, use_cache)
-            if use_cache:
+            if new_past_kv is not None:
                 new_past_kv.append(new_kv)
 
         # Final norm and projection
@@ -544,13 +589,57 @@ class CfDNACausalLM(nn.Module):
 
         return logits, new_past_kv
 
-    @torch.no_grad()
+    def _forward_with_static_cache(
+        self,
+        input_ids: torch.Tensor,
+        fragment_length: torch.Tensor | None,
+        target_gc: torch.Tensor | None,
+        target_ff: torch.Tensor | None,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        pos: int,
+    ) -> torch.Tensor:
+        """Forward pass using pre-allocated static KV cache (inference only).
+
+        Args:
+            input_ids: [B, L] token IDs
+            fragment_length: [B] fragment lengths
+            target_gc: [B] target GC content
+            target_ff: [B] target fetal fraction
+            cache_k: [num_layers, B, num_heads, max_len, head_dim]
+            cache_v: [num_layers, B, num_heads, max_len, head_dim]
+            pos: Current write position in cache
+
+        Returns:
+            logits: [B, L, vocab_size]
+        """
+        h = self.token_embed(input_ids)
+
+        if fragment_length is not None:
+            h = h + self.length_embed(fragment_length)
+        if target_gc is not None:
+            h = h + self.gc_embed(target_gc)
+        if target_ff is not None:
+            h = h + self.ff_embed(target_ff)
+
+        for i, block in enumerate(self.blocks):
+            attn_out = block.attn._attention_with_static_cache(  # type: ignore[union-attr, operator]
+                block.attn_norm(h), cache_k[i], cache_v[i], pos  # type: ignore[operator]
+            )
+            h = h + attn_out
+            h = h + block.ffn(block.ffn_norm(h))  # type: ignore[operator]
+
+        h = self.norm(h)
+        logits = self.lm_head(h)
+        return logits  # type: ignore[no-any-return]
+
+    @torch.inference_mode()
     def generate(
         self,
         condition_tokens: torch.Tensor,
         fragment_length: torch.Tensor,
-        target_gc: Optional[torch.Tensor] = None,
-        target_ff: Optional[torch.Tensor] = None,
+        target_gc: torch.Tensor | None = None,
+        target_ff: torch.Tensor | None = None,
         max_length: int = 200,
         temperature: float = 0.95,
         top_p: float = 0.96,
@@ -558,6 +647,10 @@ class CfDNACausalLM(nn.Module):
     ) -> torch.Tensor:
         """
         Generate sequences autoregressively with conditioning.
+
+        Uses a pre-allocated static KV cache to avoid per-step torch.cat
+        allocations. Sampling (temperature, top-p, length enforcement) is
+        unchanged from the original cat-cache path.
 
         Args:
             condition_tokens: [B, num_conditions] condition token IDs
@@ -575,31 +668,47 @@ class CfDNACausalLM(nn.Module):
         device = condition_tokens.device
         B = condition_tokens.shape[0]
 
-        # Start with conditions + BOS
+        # Build prefix: condition tokens + BOS
         bos = torch.full((B, 1), TOKEN_BOS, dtype=torch.long, device=device)
         input_ids = torch.cat([condition_tokens, bos], dim=1)
+        prefix_len = input_ids.shape[1]
 
-        # KV cache
-        past_kv = None
+        # Pre-allocate static KV cache
+        total_max_len = prefix_len + max_length + 1
+        dtype = next(self.parameters()).dtype
+        cache_k = torch.zeros(
+            self.config.num_layers, B, self.config.num_heads,
+            total_max_len, self.config.head_dim,
+            dtype=dtype, device=device,
+        )
+        cache_v = torch.zeros(
+            self.config.num_layers, B, self.config.num_heads,
+            total_max_len, self.config.head_dim,
+            dtype=dtype, device=device,
+        )
 
-        # Generated tokens storage
-        generated = []
+        # Prefix forward pass
+        logits = self._forward_with_static_cache(
+            input_ids, fragment_length, target_gc, target_ff,
+            cache_k, cache_v, pos=0,
+        )
+        pos = prefix_len
+
+        # Preallocate so we never torch.stack a Python list, and do not call
+        # finished.all() (that is a CUDA sync every token). Detokenize still
+        # stops at the first EOS, so extra steps after a row finishes do not
+        # change the DNA string. Sampling is the original scatter top-p.
+        eos_tokens = torch.full((B,), TOKEN_EOS, dtype=torch.long, device=device)
+        generated = torch.full(
+            (B, max_length), TOKEN_PAD, dtype=torch.long, device=device
+        )
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         tokens_generated = torch.zeros(B, dtype=torch.long, device=device)
 
-        for step in range(max_length + 1):
-            logits, past_kv = self.forward(
-                input_ids,
-                fragment_length=fragment_length,
-                target_gc=target_gc,
-                target_ff=target_ff,
-                past_kv=past_kv,
-                use_cache=True,
-            )
-
+        for step in range(max_length):
             next_logits = logits[:, -1, :] / temperature
 
-            # Top-p (nucleus) sampling
+            # Top-p (nucleus) sampling — same as origin/main
             sorted_logits, sorted_idx = torch.sort(next_logits, descending=True)
             cumsum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
@@ -614,33 +723,22 @@ class CfDNACausalLM(nn.Module):
             probs = F.softmax(next_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-            # Enforce length
             if enforce_length:
-                reached_length = tokens_generated >= fragment_length
                 next_token = torch.where(
-                    reached_length,
-                    torch.full_like(next_token, TOKEN_EOS),
-                    next_token,
+                    tokens_generated >= fragment_length, eos_tokens, next_token
                 )
 
-            generated.append(next_token)
+            generated[:, step] = next_token
             tokens_generated = tokens_generated + (~finished).long()
-
             finished = finished | (next_token == TOKEN_EOS)
-            if finished.all():
+
+            if step + 1 == max_length:
                 break
 
-            input_ids = next_token.unsqueeze(-1)
-
-        result = torch.stack(generated, dim=1)
-
-        if result.shape[1] < max_length:
-            padding = torch.full(
-                (B, max_length - result.shape[1]),
-                TOKEN_PAD,
-                dtype=torch.long,
-                device=device,
+            logits = self._forward_with_static_cache(
+                next_token.unsqueeze(-1), fragment_length, target_gc, target_ff,
+                cache_k, cache_v, pos=pos,
             )
-            result = torch.cat([result, padding], dim=1)
+            pos += 1
 
-        return result
+        return generated

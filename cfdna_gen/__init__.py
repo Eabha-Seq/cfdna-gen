@@ -15,22 +15,22 @@ Example:
     ... )
 """
 
-from .model import CfDNACausalLM, CfDNAConfig
 from .generate import CfDNAGenerator
+from .model import CfDNACausalLM, CfDNAConfig
 from .tokens import (
     TOKEN_A,
-    TOKEN_C,
-    TOKEN_G,
-    TOKEN_T,
     TOKEN_BOS,
+    TOKEN_C,
     TOKEN_EOS,
+    TOKEN_G,
     TOKEN_PAD,
+    TOKEN_T,
     VOCAB_SIZE,
-    tokens_to_sequence,
-    sequence_to_tokens,
     get_ff_bin_token,
-    get_len_bin_token,
     get_gc_bin_token,
+    get_len_bin_token,
+    sequence_to_tokens,
+    tokens_to_sequence,
 )
 
 __version__ = "1.0.0"

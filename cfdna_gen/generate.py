@@ -26,7 +26,6 @@ from .tokens import (
     get_len_bin_token,
     get_gc_bin_token,
     get_ff_bin_token,
-    tokens_to_sequence,
     TOKEN_EOS,
     TOKEN_PAD,
 )
@@ -148,7 +147,7 @@ class CfDNAGenerator:
         target_ff: Optional[float] = 0.10,
         temperature: float = 0.95,
         top_p: float = 0.96,
-        batch_size: int = 128,
+        batch_size: int = 512,
         show_progress: bool = False,
     ) -> List[str]:
         """
@@ -162,7 +161,8 @@ class CfDNAGenerator:
             target_ff: Target fetal fraction (0.0-0.5). Default is 0.10 (10%).
             temperature: Sampling temperature. Higher = more random. Default 0.95.
             top_p: Nucleus sampling threshold. Default 0.96.
-            batch_size: Number of sequences to generate per batch. Default 128.
+            batch_size: Sequences per forward-batch. Default 512. Pass 128
+                on GPUs with less than ~8 GB.
             show_progress: Whether to show a progress bar. Default False.
 
         Returns:
@@ -267,7 +267,6 @@ class CfDNAGenerator:
             t + [0] * (max_cond_len - len(t)) for t in condition_tokens
         ]
 
-        # Convert to tensors
         condition_tokens = torch.tensor(condition_tokens, dtype=torch.long, device=device)
         fragment_lengths = torch.tensor(batch_lengths, dtype=torch.long, device=device)
 
@@ -278,9 +277,8 @@ class CfDNAGenerator:
         if target_ff is not None:
             target_ff_tensor = torch.full((batch_size,), target_ff, device=device)
 
-        # Generate
         max_length = int(batch_lengths.max()) + 10
-        with torch.no_grad():
+        with torch.inference_mode():
             generated_tokens = self.model.generate(
                 condition_tokens=condition_tokens,
                 fragment_length=fragment_lengths,
@@ -292,19 +290,7 @@ class CfDNAGenerator:
                 enforce_length=True,
             )
 
-        # Convert to sequences
-        sequences = []
-        for i, tokens in enumerate(generated_tokens):
-            # Remove EOS and PAD tokens
-            seq_tokens = []
-            for t in tokens.cpu().numpy():
-                if t == TOKEN_EOS or t == TOKEN_PAD:
-                    break
-                seq_tokens.append(t)
-            seq = tokens_to_sequence(seq_tokens)
-            sequences.append(seq)
-
-        return sequences
+        return batch_tokens_to_sequences(generated_tokens)
 
     def generate_with_metadata(
         self,
@@ -416,3 +402,30 @@ class CfDNAGenerator:
                 f.write(f"{quality_char * len(seq)}\n")
 
         return len(sequences)
+
+
+# Token 0-3 → ASCII A/C/G/T. One byte lookup so a row becomes one decode.
+_TOKEN_TO_BYTE = np.array([ord("A"), ord("C"), ord("G"), ord("T")], dtype=np.uint8)
+
+
+def batch_tokens_to_sequences(generated_tokens: torch.Tensor) -> List[str]:
+    """Convert a [B, L] token tensor to DNA strings.
+
+    One host copy for the whole batch. Stops at the first EOS or PAD per row,
+    then keeps nucleotide tokens (0-3) only — same result as the old
+    per-row ``tokens_to_sequence`` loop.
+    """
+    tokens_np = generated_tokens.detach().to(device="cpu", dtype=torch.int64).numpy()
+    stop = (tokens_np == TOKEN_EOS) | (tokens_np == TOKEN_PAD)
+    has_stop = stop.any(axis=1)
+    stop_idx = np.where(has_stop, stop.argmax(axis=1), tokens_np.shape[1])
+
+    sequences: List[str] = []
+    for i, row in enumerate(tokens_np):
+        valid = row[: stop_idx[i]]
+        nuc = valid[(valid >= 0) & (valid <= 3)]
+        if nuc.size == 0:
+            sequences.append("")
+        else:
+            sequences.append(_TOKEN_TO_BYTE[nuc].tobytes().decode("ascii"))
+    return sequences

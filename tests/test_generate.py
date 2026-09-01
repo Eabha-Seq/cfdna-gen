@@ -6,8 +6,9 @@ import numpy as np
 import tempfile
 from pathlib import Path
 
-from cfdna_gen.generate import CfDNAGenerator
+from cfdna_gen.generate import CfDNAGenerator, batch_tokens_to_sequences
 from cfdna_gen.model import CfDNACausalLM, CfDNAConfig
+from cfdna_gen.tokens import TOKEN_EOS, TOKEN_PAD, tokens_to_sequence
 
 
 class TestCfDNAGenerator:
@@ -192,6 +193,28 @@ class TestCfDNAGenerator:
                 lines = f.readlines()
 
             assert len(lines) == 40
+
+
+class TestBatchTokensToSequences:
+    """Vectorized detokenize must match the old per-row loop."""
+
+    def test_matches_tokens_to_sequence(self):
+        tokens = torch.tensor([
+            [0, 1, 2, 3, TOKEN_EOS, TOKEN_PAD],
+            [3, 3, 0, TOKEN_PAD, TOKEN_PAD, TOKEN_PAD],
+            [1, TOKEN_EOS, 0, 0, 0, 0],
+        ])
+        sequences = batch_tokens_to_sequences(tokens)
+        expected = [
+            tokens_to_sequence([0, 1, 2, 3]),
+            tokens_to_sequence([3, 3, 0]),
+            tokens_to_sequence([1]),
+        ]
+        assert sequences == expected
+
+    def test_empty_after_immediate_eos(self):
+        tokens = torch.tensor([[TOKEN_EOS, 0, 1]])
+        assert batch_tokens_to_sequences(tokens) == [""]
 
 
 class TestGeneratorFromPretrained:

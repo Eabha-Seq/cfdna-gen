@@ -165,7 +165,7 @@ class TestCfDNACausalLM:
         )
 
         assert generated.shape[0] == batch_size
-        assert generated.shape[1] <= 30
+        assert generated.shape[1] == 30
 
     def test_save_load(self, small_model):
         """Test model save and load."""

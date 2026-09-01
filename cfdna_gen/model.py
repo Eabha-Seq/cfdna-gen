@@ -639,7 +639,7 @@ class CfDNACausalLM(nn.Module):
         logits = self.lm_head(h)
         return logits
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate(
         self,
         condition_tokens: torch.Tensor,
@@ -655,7 +655,8 @@ class CfDNACausalLM(nn.Module):
         Generate sequences autoregressively with conditioning.
 
         Uses a pre-allocated static KV cache to avoid per-step torch.cat
-        allocations, giving ~2x speedup over dynamic cache.
+        allocations. Sampling (temperature, top-p, length enforcement) is
+        unchanged from the original cat-cache path.
 
         Args:
             condition_tokens: [B, num_conditions] condition token IDs
@@ -699,15 +700,21 @@ class CfDNACausalLM(nn.Module):
         )
         pos = prefix_len
 
-        # Generated tokens storage
-        generated = []
+        # Preallocate so we never torch.stack a Python list, and do not call
+        # finished.all() (that is a CUDA sync every token). Detokenize still
+        # stops at the first EOS, so extra steps after a row finishes do not
+        # change the DNA string. Sampling is the original scatter top-p.
+        eos_tokens = torch.full((B,), TOKEN_EOS, dtype=torch.long, device=device)
+        generated = torch.full(
+            (B, max_length), TOKEN_PAD, dtype=torch.long, device=device
+        )
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         tokens_generated = torch.zeros(B, dtype=torch.long, device=device)
 
-        for step in range(max_length + 1):
+        for step in range(max_length):
             next_logits = logits[:, -1, :] / temperature
 
-            # Top-p (nucleus) sampling
+            # Top-p (nucleus) sampling — same as origin/main
             sorted_logits, sorted_idx = torch.sort(next_logits, descending=True)
             cumsum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
@@ -722,38 +729,22 @@ class CfDNACausalLM(nn.Module):
             probs = F.softmax(next_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-            # Enforce length
             if enforce_length:
-                reached_length = tokens_generated >= fragment_length
                 next_token = torch.where(
-                    reached_length,
-                    torch.full_like(next_token, TOKEN_EOS),
-                    next_token,
+                    tokens_generated >= fragment_length, eos_tokens, next_token
                 )
 
-            generated.append(next_token)
+            generated[:, step] = next_token
             tokens_generated = tokens_generated + (~finished).long()
-
             finished = finished | (next_token == TOKEN_EOS)
-            if finished.all():
+
+            if step + 1 == max_length:
                 break
 
-            # Forward next token through static cache
             logits = self._forward_with_static_cache(
                 next_token.unsqueeze(-1), fragment_length, target_gc, target_ff,
                 cache_k, cache_v, pos=pos,
             )
             pos += 1
 
-        result = torch.stack(generated, dim=1)
-
-        if result.shape[1] < max_length:
-            padding = torch.full(
-                (B, max_length - result.shape[1]),
-                TOKEN_PAD,
-                dtype=torch.long,
-                device=device,
-            )
-            result = torch.cat([result, padding], dim=1)
-
-        return result
+        return generated

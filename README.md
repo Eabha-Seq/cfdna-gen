@@ -132,7 +132,7 @@ sequences = generator.generate(
 sequences = generator.generate(
     n_sequences=100000,
     fragment_lengths=167,
-    batch_size=256,
+    batch_size=512,
     show_progress=True,
 )
 ```

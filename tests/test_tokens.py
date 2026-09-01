@@ -1,20 +1,29 @@
 """Tests for token utilities."""
 
 import pytest
+
 from cfdna_gen.tokens import (
-    TOKEN_A, TOKEN_C, TOKEN_G, TOKEN_T,
-    TOKEN_BOS, TOKEN_EOS, TOKEN_PAD,
+    FF_TOKEN_END,
+    FF_TOKEN_START,
+    GC_TOKEN_END,
+    GC_TOKEN_START,
+    LEN_TOKEN_END,
+    LEN_TOKEN_START,
+    TOKEN_A,
+    TOKEN_BOS,
+    TOKEN_C,
+    TOKEN_EOS,
+    TOKEN_G,
+    TOKEN_PAD,
+    TOKEN_T,
     VOCAB_SIZE,
+    decode_gc_bin_token,
+    decode_len_bin_token,
+    get_ff_bin_token,
+    get_gc_bin_token,
+    get_len_bin_token,
     sequence_to_tokens,
     tokens_to_sequence,
-    get_len_bin_token,
-    get_gc_bin_token,
-    get_ff_bin_token,
-    decode_len_bin_token,
-    decode_gc_bin_token,
-    LEN_TOKEN_START, LEN_TOKEN_END,
-    GC_TOKEN_START, GC_TOKEN_END,
-    FF_TOKEN_START, FF_TOKEN_END,
 )
 
 

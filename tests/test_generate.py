@@ -1,10 +1,11 @@
 """Tests for the CfDNAGenerator high-level API."""
 
-import pytest
-import torch
-import numpy as np
 import tempfile
 from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
 
 from cfdna_gen.generate import CfDNAGenerator, batch_tokens_to_sequences
 from cfdna_gen.model import CfDNACausalLM, CfDNAConfig

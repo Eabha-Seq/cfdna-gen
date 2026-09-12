@@ -182,6 +182,7 @@ class CfDNAGenerator:
             ... )
         """
         # Handle fragment lengths
+        lengths: np.ndarray
         if isinstance(fragment_lengths, int):
             lengths = np.full(n_sequences, fragment_lengths)
         elif isinstance(fragment_lengths, list):

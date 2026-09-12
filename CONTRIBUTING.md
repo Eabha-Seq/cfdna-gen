@@ -83,6 +83,13 @@ When reporting issues, please include:
 - Focus on constructive feedback
 - Help others learn and grow
 
+## Training and fetal-fraction conditioning
+
+This repository is the **inference** package. The trainer and data pipeline
+are private. Do not add tests that claim `target_ff` changes sequences on
+published v15 weights. See [docs/FF_CONDITIONING_FIX.md](docs/FF_CONDITIONING_FIX.md)
+for the continued-train brief.
+
 ## Questions?
 
 Feel free to open an issue for questions or discussions about the project.

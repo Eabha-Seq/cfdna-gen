@@ -19,8 +19,8 @@ Example:
 """
 
 import json
-import math
-from dataclasses import dataclass, asdict
+import warnings
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -28,9 +28,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tokens import VOCAB_SIZE, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD
+from .tokens import FF_TOKEN_END, FF_TOKEN_START, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, VOCAB_SIZE
 
-__all__ = ["CfDNAConfig", "CfDNACausalLM"]
+__all__ = [
+    "CfDNAConfig",
+    "CfDNACausalLM",
+    "FF_EMBED_COLLAPSE_L2_THRESHOLD",
+    "diagnose_ff_conditioning",
+    "ff_embed_l2_delta",
+]
+
+# Continuous FF path is treated as collapsed when ||FF(0.01)-FF(0.10)|| is
+# below this. Randomly initialized heads are far above; v15 published weights
+# are near zero. Chosen so CI never needs real checkpoints.
+FF_EMBED_COLLAPSE_L2_THRESHOLD = 1e-3
 
 
 @dataclass
@@ -272,7 +283,12 @@ class GCEmbedding(nn.Module):
 
 
 class FFEmbedding(nn.Module):
-    """Continuous fetal fraction embedding for per-sequence FF conditioning."""
+    """Continuous fetal fraction embedding for per-sequence FF conditioning.
+
+    Dual path with the FF bin token. On published v15 weights this head is
+    effectively collapsed (near-constant); do not treat ``target_ff`` as a
+    fetal-fraction simulator. See docs/FF_CONDITIONING_FIX.md.
+    """
 
     def __init__(self, hidden_dim: int):
         super().__init__()
@@ -292,7 +308,10 @@ class CfDNACausalLM(nn.Module):
     Conditional Causal Language Model for cfDNA generation.
 
     A 120M parameter transformer that generates realistic cell-free DNA
-    sequences conditioned on fragment length, GC content, and fetal fraction.
+    sequences conditioned on fragment length and GC content.
+
+    Fetal fraction is a dual-path library-level style signal (bin token +
+    this continuous head). Published v15 weights do not use it in practice.
 
     Architecture:
         - Token embedding (vocab -> hidden)
@@ -414,6 +433,7 @@ class CfDNACausalLM(nn.Module):
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                 model = model.to(device)
                 model.eval()
+                _warn_if_ff_embed_collapsed(model)
                 return model
             except ImportError:
                 raise ImportError(
@@ -462,6 +482,7 @@ class CfDNACausalLM(nn.Module):
             device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         model.eval()
+        _warn_if_ff_embed_collapsed(model)
 
         return model
 
@@ -644,3 +665,79 @@ class CfDNACausalLM(nn.Module):
             result = torch.cat([result, padding], dim=1)
 
         return result
+
+
+def ff_embed_l2_delta(
+    ff_embed: FFEmbedding,
+    ff_a: float = 0.01,
+    ff_b: float = 0.10,
+) -> float:
+    """L2 distance between continuous FF embeddings at two fetal fractions."""
+    device = next(ff_embed.parameters()).device
+    dtype = next(ff_embed.parameters()).dtype
+    with torch.no_grad():
+        a = ff_embed(torch.tensor([ff_a], device=device, dtype=dtype))
+        b = ff_embed(torch.tensor([ff_b], device=device, dtype=dtype))
+        return float(torch.linalg.vector_norm(a - b).item())
+
+
+def diagnose_ff_conditioning(
+    model: CfDNACausalLM,
+    ff_low: float = 0.01,
+    ff_high: float = 0.10,
+    collapse_l2_threshold: float = FF_EMBED_COLLAPSE_L2_THRESHOLD,
+) -> dict:
+    """
+    Measure whether FF conditioning varies with fetal fraction.
+
+    Operates on an already-loaded model — does not download weights.
+    Used by ``from_pretrained`` (serve-time warning) and
+    ``scripts/check_ff_embedding_collapse.py`` (full checkpoint report).
+
+    Returns:
+        Dict with continuous L2 delta, collapse flag, optional GC comparison,
+        and mean off-diagonal cosine among FF bin token embeddings.
+    """
+    continuous_l2 = ff_embed_l2_delta(model.ff_embed, ff_low, ff_high)
+
+    device = next(model.parameters()).device
+    dtype = next(model.gc_embed.parameters()).dtype
+    with torch.no_grad():
+        gc_a = model.gc_embed(torch.tensor([0.40], device=device, dtype=dtype))
+        gc_b = model.gc_embed(torch.tensor([0.50], device=device, dtype=dtype))
+        gc_l2 = torch.linalg.vector_norm(gc_a - gc_b).item()
+
+        ff_tokens = model.token_embed.weight[FF_TOKEN_START:FF_TOKEN_END]
+        normalized = F.normalize(ff_tokens, dim=-1)
+        cosine = normalized @ normalized.T
+        n = cosine.shape[0]
+        off_diag = cosine[~torch.eye(n, dtype=torch.bool, device=cosine.device)]
+        mean_ff_token_cosine = off_diag.mean().item()
+
+    return {
+        "ff_low": ff_low,
+        "ff_high": ff_high,
+        "continuous_l2": continuous_l2,
+        "gc_l2_0_40_vs_0_50": gc_l2,
+        "continuous_collapsed": continuous_l2 < collapse_l2_threshold,
+        "collapse_l2_threshold": collapse_l2_threshold,
+        "mean_ff_token_cosine": mean_ff_token_cosine,
+    }
+
+
+def _warn_if_ff_embed_collapsed(model: CfDNACausalLM) -> None:
+    """Serve-time notice when the continuous FF path is near-constant."""
+    report = diagnose_ff_conditioning(model)
+    if not report["continuous_collapsed"]:
+        return
+    warnings.warn(
+        "Continuous FFEmbedding appears collapsed: "
+        f"||FFEmbedding({report['ff_low']})-FFEmbedding({report['ff_high']})|| "
+        f"= {report['continuous_l2']:.2e} "
+        f"(threshold {report['collapse_l2_threshold']}). "
+        "On published v15 weights, target_ff alone does not change fragment "
+        "realism. Define low-FF look in a mixer (length / origin / coverage). "
+        "See docs/FF_CONDITIONING_FIX.md.",
+        UserWarning,
+        stacklevel=3,
+    )

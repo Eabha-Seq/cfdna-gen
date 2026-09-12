@@ -18,20 +18,37 @@ Example:
 from pathlib import Path
 from typing import List, Optional, Union
 
-import torch
 import numpy as np
+import torch
 
-from .model import CfDNACausalLM, CfDNAConfig
+from .model import CfDNACausalLM
 from .tokens import (
-    get_len_bin_token,
-    get_gc_bin_token,
-    get_ff_bin_token,
-    tokens_to_sequence,
     TOKEN_EOS,
     TOKEN_PAD,
+    get_ff_bin_token,
+    get_gc_bin_token,
+    get_len_bin_token,
+    tokens_to_sequence,
+    validate_fetal_fraction,
 )
 
-__all__ = ["CfDNAGenerator"]
+__all__ = ["CfDNAGenerator", "pad_condition_tokens"]
+
+
+def pad_condition_tokens(
+    condition_tokens: list[list[int]],
+    pad_id: int = TOKEN_PAD,
+) -> list[list[int]]:
+    """
+    Pad condition-token lists to a common length.
+
+    Uses ``TOKEN_PAD`` (not ``TOKEN_A``) so padding cannot be mistaken for
+    a nucleotide condition token.
+    """
+    if not condition_tokens:
+        return []
+    max_cond_len = max(len(t) for t in condition_tokens)
+    return [t + [pad_id] * (max_cond_len - len(t)) for t in condition_tokens]
 
 
 class CfDNAGenerator:
@@ -39,8 +56,15 @@ class CfDNAGenerator:
     High-level API for generating synthetic cfDNA sequences.
 
     This class provides a simple interface for generating realistic cell-free
-    DNA sequences with controllable properties like fragment length, GC content,
-    and fetal fraction.
+    DNA sequences with controllable fragment length and GC content.
+
+    Fetal fraction (``target_ff``, default 0.10) is library-level style
+    conditioning on a dual path (FF bin token + continuous ``FFEmbedding``).
+    On published v15 weights the continuous path is collapsed and bin-token
+    embeddings are nearly identical, so ``target_ff`` alone does not simulate
+    different fetal fractions or bimodal low-FF libraries. Low-FF look must
+    be defined in a mixer (length mix, maternal vs fetal origin, coverage).
+    See docs/FF_CONDITIONING_FIX.md.
 
     Attributes:
         model: The underlying CfDNACausalLM model
@@ -129,7 +153,10 @@ class CfDNAGenerator:
             fragment_lengths: Target fragment length(s) in base pairs.
                 Can be a single int (same for all), list, or numpy array.
             target_gc: Target GC content (0.0-1.0). Default is 0.42 (typical cfDNA).
-            target_ff: Target fetal fraction (0.0-0.5). Default is 0.10 (10%).
+            target_ff: Library-level fetal-fraction style token / embed
+                (documented 0.0-0.5). Default is 0.10 (10%). Left-tail values
+                0–2% share one bin. On published v15 weights this does **not**
+                by itself change fragment realism or simulate low-FF libraries.
             temperature: Sampling temperature. Higher = more random. Default 0.95.
             top_p: Nucleus sampling threshold. Default 0.96.
             batch_size: Number of sequences to generate per batch. Default 128.
@@ -169,6 +196,9 @@ class CfDNAGenerator:
             raise ValueError(
                 f"fragment_lengths has {len(lengths)} elements but n_sequences={n_sequences}"
             )
+
+        if target_ff is not None:
+            validate_fetal_fraction(target_ff)
 
         # Generate in batches
         all_sequences = []
@@ -222,14 +252,11 @@ class CfDNAGenerator:
                 tokens.append(get_ff_bin_token(target_ff))
             condition_tokens.append(tokens)
 
-        # Pad to same length
-        max_cond_len = max(len(t) for t in condition_tokens)
-        condition_tokens = [
-            t + [0] * (max_cond_len - len(t)) for t in condition_tokens
-        ]
+        # Pad to same length with TOKEN_PAD (not TOKEN_A / 0)
+        padded_conditions = pad_condition_tokens(condition_tokens)
 
         # Convert to tensors
-        condition_tokens = torch.tensor(condition_tokens, dtype=torch.long, device=device)
+        condition_token_ids = torch.tensor(padded_conditions, dtype=torch.long, device=device)
         fragment_lengths = torch.tensor(batch_lengths, dtype=torch.long, device=device)
 
         target_gc_tensor = None
@@ -243,7 +270,7 @@ class CfDNAGenerator:
         max_length = int(batch_lengths.max()) + 10
         with torch.no_grad():
             generated_tokens = self.model.generate(
-                condition_tokens=condition_tokens,
+                condition_tokens=condition_token_ids,
                 fragment_length=fragment_lengths,
                 target_gc=target_gc_tensor,
                 target_ff=target_ff_tensor,
@@ -284,7 +311,8 @@ class CfDNAGenerator:
             n_sequences: Number of sequences to generate
             fragment_lengths: Target fragment length(s) in base pairs
             target_gc: Target GC content (0.0-1.0)
-            target_ff: Target fetal fraction (0.0-0.5)
+            target_ff: Library-level FF style conditioning (default 0.10).
+                See generate() — not a standalone low-FF simulator on v15.
             **kwargs: Additional arguments passed to generate()
 
         Returns:
@@ -339,7 +367,8 @@ class CfDNAGenerator:
             fragment_lengths: Target fragment length(s) in base pairs
             output_path: Path to output FASTQ file (.fastq or .fastq.gz)
             target_gc: Target GC content (0.0-1.0)
-            target_ff: Target fetal fraction (0.0-0.5)
+            target_ff: Library-level FF style conditioning (default 0.10).
+                See generate() — not a standalone low-FF simulator on v15.
             quality_score: Phred quality score for all bases (default: 30)
             **kwargs: Additional arguments passed to generate()
 

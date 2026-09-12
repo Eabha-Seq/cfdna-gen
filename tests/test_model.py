@@ -1,13 +1,13 @@
 """Tests for the CfDNACausalLM model."""
 
-import pytest
-import torch
-import json
 import tempfile
 from pathlib import Path
 
-from cfdna_gen.model import CfDNAConfig, CfDNACausalLM
-from cfdna_gen.tokens import VOCAB_SIZE, TOKEN_BOS
+import pytest
+import torch
+
+from cfdna_gen.model import CfDNACausalLM, CfDNAConfig
+from cfdna_gen.tokens import VOCAB_SIZE
 
 
 class TestCfDNAConfig:
@@ -192,6 +192,33 @@ class TestCfDNACausalLM:
 
             assert torch.allclose(orig_out, loaded_out, atol=1e-5)
 
+    def test_diagnose_collapsed_head_flags_model(self, small_model):
+        """diagnose_ff_conditioning flags a zeroed continuous head."""
+        from cfdna_gen.model import diagnose_ff_conditioning
+
+        with torch.no_grad():
+            for param in small_model.ff_embed.parameters():
+                param.zero_()
+        report = diagnose_ff_conditioning(small_model)
+        assert report["continuous_collapsed"] is True
+        assert report["continuous_l2"] < report["collapse_l2_threshold"]
+        assert "mean_ff_token_cosine" in report
+        assert "gc_l2_0_40_vs_0_50" in report
+
+    def test_from_pretrained_warns_when_ff_collapsed(self, small_model):
+        """Loading a checkpoint with a collapsed FF head emits the serve-time warning."""
+        from cfdna_gen.model import CfDNACausalLM
+
+        with torch.no_grad():
+            for param in small_model.ff_embed.parameters():
+                param.zero_()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "collapsed"
+            small_model.save_pretrained(path)
+            with pytest.warns(UserWarning, match="Continuous FFEmbedding appears collapsed"):
+                CfDNACausalLM.from_pretrained(path, device="cpu")
+
 
 class TestModelComponents:
     """Test individual model components."""
@@ -247,3 +274,30 @@ class TestModelComponents:
         y = embed(ff)
 
         assert y.shape == (3, 1, 64)
+
+    def test_ff_embed_l2_random_init_not_collapsed(self):
+        """Random FFEmbedding(0.01) vs (0.10) must move — check is non-vacuous."""
+        from cfdna_gen.model import (
+            FF_EMBED_COLLAPSE_L2_THRESHOLD,
+            FFEmbedding,
+            ff_embed_l2_delta,
+        )
+
+        embed = FFEmbedding(64)
+        delta = ff_embed_l2_delta(embed, 0.01, 0.10)
+        assert delta > FF_EMBED_COLLAPSE_L2_THRESHOLD
+
+    def test_ff_embed_l2_zero_weights_collapsed(self):
+        """A zeroed head is detected as collapsed (no checkpoint download)."""
+        from cfdna_gen.model import (
+            FF_EMBED_COLLAPSE_L2_THRESHOLD,
+            FFEmbedding,
+            ff_embed_l2_delta,
+        )
+
+        embed = FFEmbedding(64)
+        with torch.no_grad():
+            for param in embed.parameters():
+                param.zero_()
+        delta = ff_embed_l2_delta(embed, 0.01, 0.10)
+        assert delta < FF_EMBED_COLLAPSE_L2_THRESHOLD

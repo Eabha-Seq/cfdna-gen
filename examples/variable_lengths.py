@@ -14,12 +14,14 @@ def main():
     print("Loading model...")
     generator = CfDNAGenerator.from_pretrained("eabhaseq/cfdna-gen")
 
-    # Real cfDNA has a bimodal distribution:
-    # - Fetal fragments: ~144bp (shorter)
-    # - Maternal fragments: ~167bp (longer)
+    # Real cfDNA has a bimodal length mix. On published v15 weights that
+    # look comes from sampling fragment lengths (mixer-style), not from
+    # target_ff — the continuous FF path is collapsed.
+    # - Fetal-like fragments: ~144bp (shorter)
+    # - Maternal-like fragments: ~167bp (longer)
 
     n_sequences = 100
-    fetal_fraction = 0.10  # 10% fetal
+    fetal_fraction = 0.10  # mix proportion for lengths; API default target_ff
 
     # Sample fragment lengths from bimodal distribution
     n_fetal = int(n_sequences * fetal_fraction)

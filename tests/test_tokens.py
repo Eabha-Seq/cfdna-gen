@@ -1,20 +1,32 @@
 """Tests for token utilities."""
 
 import pytest
+
 from cfdna_gen.tokens import (
-    TOKEN_A, TOKEN_C, TOKEN_G, TOKEN_T,
-    TOKEN_BOS, TOKEN_EOS, TOKEN_PAD,
+    FF_BIN_BOUNDARIES,
+    FF_TOKEN_END,
+    FF_TOKEN_START,
+    GC_TOKEN_END,
+    GC_TOKEN_START,
+    LEN_TOKEN_END,
+    LEN_TOKEN_START,
+    TOKEN_A,
+    TOKEN_BOS,
+    TOKEN_C,
+    TOKEN_EOS,
+    TOKEN_G,
+    TOKEN_PAD,
+    TOKEN_T,
     VOCAB_SIZE,
+    decode_ff_bin_token,
+    decode_gc_bin_token,
+    decode_len_bin_token,
+    get_ff_bin_token,
+    get_gc_bin_token,
+    get_len_bin_token,
     sequence_to_tokens,
     tokens_to_sequence,
-    get_len_bin_token,
-    get_gc_bin_token,
-    get_ff_bin_token,
-    decode_len_bin_token,
-    decode_gc_bin_token,
-    LEN_TOKEN_START, LEN_TOKEN_END,
-    GC_TOKEN_START, GC_TOKEN_END,
-    FF_TOKEN_START, FF_TOKEN_END,
+    validate_fetal_fraction,
 )
 
 
@@ -163,3 +175,64 @@ class TestFFBinTokens:
         diff_high = get_ff_bin_token(0.38) - get_ff_bin_token(0.34)
         # Low should have at least as fine resolution
         assert diff_low >= diff_high
+
+    def test_left_tail_shares_bin(self):
+        """0.5% and 1.9% share the coarse 0–2% bin; 2% is the next bin."""
+        token_005 = get_ff_bin_token(0.005)
+        token_019 = get_ff_bin_token(0.019)
+        token_020 = get_ff_bin_token(0.02)
+
+        assert token_005 == token_019 == FF_TOKEN_START
+        assert token_020 == FF_TOKEN_START + 1
+        assert token_005 != token_020
+        assert token_019 != token_020
+
+    def test_decode_ff_bin_left_tail(self):
+        """decode_ff_bin_token reports the coarse [0.00, 0.02) left-tail range."""
+        min_ff, max_ff = decode_ff_bin_token(get_ff_bin_token(0.005))
+        assert min_ff == 0.0
+        assert max_ff == 0.02
+        assert min_ff <= 0.005 < max_ff
+        assert min_ff <= 0.019 < max_ff
+        assert not (min_ff <= 0.02 < max_ff)
+
+    def test_decode_ff_bin_typical_and_last(self):
+        """Typical 10% bin and last (>=40%) bin decode to the shared edges."""
+        min_ff, max_ff = decode_ff_bin_token(get_ff_bin_token(0.10))
+        assert min_ff == 0.10
+        assert max_ff == 0.12
+
+        last_min, last_max = decode_ff_bin_token(get_ff_bin_token(0.40))
+        assert last_min == 0.40
+        assert last_max == 0.50
+        assert get_ff_bin_token(0.45) == get_ff_bin_token(0.40)
+
+    def test_decode_ff_bin_rejects_non_ff_token(self):
+        """Non-FF tokens must not decode as FF bins."""
+        with pytest.raises(ValueError, match="not a fetal-fraction bin token"):
+            decode_ff_bin_token(TOKEN_PAD)
+
+    def test_ff_boundaries_count(self):
+        """Token map has 17 bins / 17 left edges, matching tokens.py."""
+        assert len(FF_BIN_BOUNDARIES) == 17
+        assert FF_TOKEN_END - FF_TOKEN_START == 17
+
+    def test_ff_out_of_range_warns(self):
+        """Documented range is [0.0, 0.5]; outside that must warn."""
+        with pytest.warns(UserWarning, match="outside the documented range"):
+            get_ff_bin_token(-0.01)
+        with pytest.warns(UserWarning, match="outside the documented range"):
+            get_ff_bin_token(0.51)
+        with pytest.warns(UserWarning, match="outside the documented range"):
+            validate_fetal_fraction(1.0)
+
+    def test_ff_in_range_no_warning(self):
+        """In-range values including the default 0.10 must not warn."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            get_ff_bin_token(0.0)
+            get_ff_bin_token(0.10)
+            get_ff_bin_token(0.50)
+        assert recorded == []

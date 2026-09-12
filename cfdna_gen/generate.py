@@ -16,7 +16,6 @@ Example:
 """
 
 from pathlib import Path
-from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -91,7 +90,7 @@ class CfDNAGenerator:
     def __init__(
         self,
         model: CfDNACausalLM,
-        device: Optional[str] = None,
+        device: str | None = None,
     ):
         """
         Initialize the generator with a model.
@@ -112,8 +111,8 @@ class CfDNAGenerator:
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo: Union[str, Path],
-        device: Optional[str] = None,
+        path_or_repo: str | Path,
+        device: str | None = None,
     ) -> "CfDNAGenerator":
         """
         Load a generator from a pretrained model.
@@ -137,14 +136,14 @@ class CfDNAGenerator:
     def generate(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         temperature: float = 0.95,
         top_p: float = 0.96,
         batch_size: int = 128,
         show_progress: bool = False,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Generate synthetic cfDNA sequences.
 
@@ -231,11 +230,11 @@ class CfDNAGenerator:
     def _generate_batch(
         self,
         batch_lengths: np.ndarray,
-        target_gc: Optional[float],
-        target_ff: Optional[float],
+        target_gc: float | None,
+        target_ff: float | None,
         temperature: float,
         top_p: float,
-    ) -> List[str]:
+    ) -> list[str]:
         """Generate a batch of sequences."""
         batch_size = len(batch_lengths)
         device = self.device
@@ -282,11 +281,11 @@ class CfDNAGenerator:
 
         # Convert to sequences
         sequences = []
-        for i, tokens in enumerate(generated_tokens):
+        for _i, tokens in enumerate(generated_tokens):
             # Remove EOS and PAD tokens
             seq_tokens = []
             for t in tokens.cpu().numpy():
-                if t == TOKEN_EOS or t == TOKEN_PAD:
+                if t in (TOKEN_EOS, TOKEN_PAD):
                     break
                 seq_tokens.append(t)
             seq = tokens_to_sequence(seq_tokens)
@@ -297,11 +296,11 @@ class CfDNAGenerator:
     def generate_with_metadata(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         **kwargs,
-    ) -> List[dict]:
+    ) -> list[dict]:
         """
         Generate sequences with metadata.
 
@@ -352,10 +351,10 @@ class CfDNAGenerator:
     def generate_fastq(
         self,
         n_sequences: int,
-        fragment_lengths: Union[int, List[int], np.ndarray],
-        output_path: Union[str, Path],
-        target_gc: Optional[float] = 0.42,
-        target_ff: Optional[float] = 0.10,
+        fragment_lengths: int | list[int] | np.ndarray,
+        output_path: str | Path,
+        target_gc: float | None = 0.42,
+        target_ff: float | None = 0.10,
         quality_score: int = 30,
         **kwargs,
     ) -> int:
@@ -400,9 +399,9 @@ class CfDNAGenerator:
 
         with open_fn(output_path, mode) as f:
             for i, seq in enumerate(sequences):
-                f.write(f"@synthetic_cfdna_{i:08d}\n")
-                f.write(f"{seq}\n")
-                f.write("+\n")
-                f.write(f"{quality_char * len(seq)}\n")
+                f.write(f"@synthetic_cfdna_{i:08d}\n")  # type: ignore[arg-type]
+                f.write(f"{seq}\n")  # type: ignore[arg-type]
+                f.write("+\n")  # type: ignore[arg-type]
+                f.write(f"{quality_char * len(seq)}\n")  # type: ignore[arg-type]
 
         return len(sequences)

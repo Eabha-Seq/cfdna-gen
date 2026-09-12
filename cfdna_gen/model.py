@@ -19,18 +19,28 @@ Example:
 """
 
 import json
-import math
-from dataclasses import dataclass, asdict
+import warnings
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tokens import VOCAB_SIZE, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD
+from .tokens import FF_TOKEN_END, FF_TOKEN_START, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, VOCAB_SIZE
 
-__all__ = ["CfDNAConfig", "CfDNACausalLM"]
+__all__ = [
+    "CfDNAConfig",
+    "CfDNACausalLM",
+    "FF_EMBED_COLLAPSE_L2_THRESHOLD",
+    "diagnose_ff_conditioning",
+    "ff_embed_l2_delta",
+]
+
+# Continuous FF path is treated as collapsed when ||FF(0.01)-FF(0.10)|| is
+# below this. Randomly initialized heads are far above; v15 published weights
+# are near zero. Chosen so CI never needs real checkpoints.
+FF_EMBED_COLLAPSE_L2_THRESHOLD = 1e-3
 
 
 @dataclass
@@ -74,14 +84,14 @@ class CfDNAConfig:
         """Create config from dictionary."""
         return cls(**{k: v for k, v in d.items() if k != "head_dim"})
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         """Save config to JSON file."""
         path = Path(path)
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
 
     @classmethod
-    def load(cls, path: Union[str, Path]) -> "CfDNAConfig":
+    def load(cls, path: str | Path) -> "CfDNAConfig":
         """Load config from JSON file."""
         path = Path(path)
         with open(path) as f:
@@ -116,11 +126,10 @@ class RotaryPositionEmbedding(nn.Module):
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
         self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
-    def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        return (
-            self.cos_cached[:seq_len].to(x.dtype),
-            self.sin_cached[:seq_len].to(x.dtype),
-        )
+    def forward(self, x: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        cos = self.cos_cached[:seq_len].to(x.dtype)  # type: ignore[index]
+        sin = self.sin_cached[:seq_len].to(x.dtype)  # type: ignore[index]
+        return (cos, sin)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -131,7 +140,7 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 def apply_rotary_pos_emb(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply rotary position embeddings to Q and K."""
     q_embed = q * cos + rotate_half(q) * sin
     k_embed = k * cos + rotate_half(k) * sin
@@ -149,7 +158,7 @@ class SwiGLU(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))  # type: ignore[no-any-return]
 
 
 class CausalSelfAttention(nn.Module):
@@ -174,9 +183,9 @@ class CausalSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, L, D = x.shape
 
         q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
@@ -233,9 +242,9 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         attn_out, new_kv = self.attn(self.attn_norm(x), past_kv, use_cache)
         x = x + attn_out
         x = x + self.ffn(self.ffn_norm(x))
@@ -252,7 +261,7 @@ class LengthEmbedding(nn.Module):
 
     def forward(self, length: torch.Tensor) -> torch.Tensor:
         normalized = length.float() / self.max_length
-        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)
+        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)  # type: ignore[no-any-return]
 
 
 class GCEmbedding(nn.Module):
@@ -268,11 +277,16 @@ class GCEmbedding(nn.Module):
 
     def forward(self, gc: torch.Tensor) -> torch.Tensor:
         normalized = (gc.float() - 0.42) * 5.0
-        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)
+        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)  # type: ignore[no-any-return]
 
 
 class FFEmbedding(nn.Module):
-    """Continuous fetal fraction embedding for per-sequence FF conditioning."""
+    """Continuous fetal fraction embedding for per-sequence FF conditioning.
+
+    Dual path with the FF bin token. On published v15 weights this head is
+    effectively collapsed (near-constant); do not treat ``target_ff`` as a
+    fetal-fraction simulator. See docs/FF_CONDITIONING_FIX.md.
+    """
 
     def __init__(self, hidden_dim: int):
         super().__init__()
@@ -284,7 +298,7 @@ class FFEmbedding(nn.Module):
 
     def forward(self, ff: torch.Tensor) -> torch.Tensor:
         normalized = (ff.float() - 0.10) * 10.0
-        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)
+        return self.proj(normalized.unsqueeze(-1)).unsqueeze(1)  # type: ignore[no-any-return]
 
 
 class CfDNACausalLM(nn.Module):
@@ -292,7 +306,10 @@ class CfDNACausalLM(nn.Module):
     Conditional Causal Language Model for cfDNA generation.
 
     A 120M parameter transformer that generates realistic cell-free DNA
-    sequences conditioned on fragment length, GC content, and fetal fraction.
+    sequences conditioned on fragment length and GC content.
+
+    Fetal fraction is a dual-path library-level style signal (bin token +
+    this continuous head). Published v15 weights do not use it in practice.
 
     Architecture:
         - Token embedding (vocab -> hidden)
@@ -351,8 +368,8 @@ class CfDNACausalLM(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo: Union[str, Path],
-        device: Optional[str] = None,
+        path_or_repo: str | Path,
+        device: str | None = None,
         **kwargs,
     ) -> "CfDNACausalLM":
         """
@@ -384,16 +401,15 @@ class CfDNACausalLM(nn.Module):
                 raise ImportError(
                     "huggingface_hub is required to download models. "
                     "Install with: pip install huggingface-hub"
-                )
+                ) from None
             except Exception as e:
-                raise ValueError(f"Could not find model at {path_or_repo}: {e}")
+                raise ValueError(f"Could not find model at {path_or_repo}: {e}") from e
 
         # Load config
         config_path = path / "config.json"
-        if config_path.exists():
-            config = CfDNAConfig.load(config_path)
-        else:
-            config = CfDNAConfig(**kwargs)
+        config = (
+            CfDNAConfig.load(config_path) if config_path.exists() else CfDNAConfig(**kwargs)
+        )
 
         # Create model
         model = cls(config)
@@ -414,12 +430,13 @@ class CfDNACausalLM(nn.Module):
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                 model = model.to(device)
                 model.eval()
+                _warn_if_ff_embed_collapsed(model)
                 return model
             except ImportError:
                 raise ImportError(
                     "safetensors is required to load model weights. "
                     "Install with: pip install safetensors"
-                )
+                ) from None
         else:
             # Try PyTorch format
             pt_path = path / "model.pt"
@@ -462,10 +479,11 @@ class CfDNACausalLM(nn.Module):
             device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         model.eval()
+        _warn_if_ff_embed_collapsed(model)
 
         return model
 
-    def save_pretrained(self, path: Union[str, Path]) -> None:
+    def save_pretrained(self, path: str | Path) -> None:
         """
         Save model and config to a directory.
 
@@ -494,12 +512,12 @@ class CfDNACausalLM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        fragment_length: Optional[torch.Tensor] = None,
-        target_gc: Optional[torch.Tensor] = None,
-        target_ff: Optional[torch.Tensor] = None,
-        past_kv: Optional[list] = None,
+        fragment_length: torch.Tensor | None = None,
+        target_gc: torch.Tensor | None = None,
+        target_ff: torch.Tensor | None = None,
+        past_kv: list | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[list]]:
+    ) -> tuple[torch.Tensor, list | None]:
         """
         Forward pass.
 
@@ -531,11 +549,11 @@ class CfDNACausalLM(nn.Module):
         h = self.drop(h)
 
         # Transformer blocks
-        new_past_kv = [] if use_cache else None
+        new_past_kv: list | None = [] if use_cache else None
         for i, block in enumerate(self.blocks):
             layer_past = past_kv[i] if past_kv is not None else None
             h, new_kv = block(h, layer_past, use_cache)
-            if use_cache:
+            if use_cache and new_past_kv is not None:
                 new_past_kv.append(new_kv)
 
         # Final norm and projection
@@ -549,8 +567,8 @@ class CfDNACausalLM(nn.Module):
         self,
         condition_tokens: torch.Tensor,
         fragment_length: torch.Tensor,
-        target_gc: Optional[torch.Tensor] = None,
-        target_ff: Optional[torch.Tensor] = None,
+        target_gc: torch.Tensor | None = None,
+        target_ff: torch.Tensor | None = None,
         max_length: int = 200,
         temperature: float = 0.95,
         top_p: float = 0.96,
@@ -587,7 +605,7 @@ class CfDNACausalLM(nn.Module):
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         tokens_generated = torch.zeros(B, dtype=torch.long, device=device)
 
-        for step in range(max_length + 1):
+        for _step in range(max_length + 1):
             logits, past_kv = self.forward(
                 input_ids,
                 fragment_length=fragment_length,
@@ -644,3 +662,79 @@ class CfDNACausalLM(nn.Module):
             result = torch.cat([result, padding], dim=1)
 
         return result
+
+
+def ff_embed_l2_delta(
+    ff_embed: FFEmbedding,
+    ff_a: float = 0.01,
+    ff_b: float = 0.10,
+) -> float:
+    """L2 distance between continuous FF embeddings at two fetal fractions."""
+    device = next(ff_embed.parameters()).device
+    dtype = next(ff_embed.parameters()).dtype
+    with torch.no_grad():
+        a = ff_embed(torch.tensor([ff_a], device=device, dtype=dtype))
+        b = ff_embed(torch.tensor([ff_b], device=device, dtype=dtype))
+        return float(torch.linalg.vector_norm(a - b).item())
+
+
+def diagnose_ff_conditioning(
+    model: CfDNACausalLM,
+    ff_low: float = 0.01,
+    ff_high: float = 0.10,
+    collapse_l2_threshold: float = FF_EMBED_COLLAPSE_L2_THRESHOLD,
+) -> dict:
+    """
+    Measure whether FF conditioning varies with fetal fraction.
+
+    Operates on an already-loaded model — does not download weights.
+    Used by ``from_pretrained`` (serve-time warning) and
+    ``scripts/check_ff_embedding_collapse.py`` (full checkpoint report).
+
+    Returns:
+        Dict with continuous L2 delta, collapse flag, optional GC comparison,
+        and mean off-diagonal cosine among FF bin token embeddings.
+    """
+    continuous_l2 = ff_embed_l2_delta(model.ff_embed, ff_low, ff_high)
+
+    device = next(model.parameters()).device
+    dtype = next(model.gc_embed.parameters()).dtype
+    with torch.no_grad():
+        gc_a = model.gc_embed(torch.tensor([0.40], device=device, dtype=dtype))
+        gc_b = model.gc_embed(torch.tensor([0.50], device=device, dtype=dtype))
+        gc_l2 = torch.linalg.vector_norm(gc_a - gc_b).item()
+
+        ff_tokens = model.token_embed.weight[FF_TOKEN_START:FF_TOKEN_END]
+        normalized = F.normalize(ff_tokens, dim=-1)
+        cosine = normalized @ normalized.T
+        n = cosine.shape[0]
+        off_diag = cosine[~torch.eye(n, dtype=torch.bool, device=cosine.device)]
+        mean_ff_token_cosine = off_diag.mean().item()
+
+    return {
+        "ff_low": ff_low,
+        "ff_high": ff_high,
+        "continuous_l2": continuous_l2,
+        "gc_l2_0_40_vs_0_50": gc_l2,
+        "continuous_collapsed": continuous_l2 < collapse_l2_threshold,
+        "collapse_l2_threshold": collapse_l2_threshold,
+        "mean_ff_token_cosine": mean_ff_token_cosine,
+    }
+
+
+def _warn_if_ff_embed_collapsed(model: CfDNACausalLM) -> None:
+    """Serve-time notice when the continuous FF path is near-constant."""
+    report = diagnose_ff_conditioning(model)
+    if not report["continuous_collapsed"]:
+        return
+    warnings.warn(
+        "Continuous FFEmbedding appears collapsed: "
+        f"||FFEmbedding({report['ff_low']})-FFEmbedding({report['ff_high']})|| "
+        f"= {report['continuous_l2']:.2e} "
+        f"(threshold {report['collapse_l2_threshold']}). "
+        "On published v15 weights, target_ff alone does not change fragment "
+        "realism. Define low-FF look in a mixer (length / origin / coverage). "
+        "See docs/FF_CONDITIONING_FIX.md.",
+        UserWarning,
+        stacklevel=3,
+    )

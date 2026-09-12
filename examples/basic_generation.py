@@ -22,7 +22,7 @@ def main():
         n_sequences=10,
         fragment_lengths=165,  # Typical cfDNA fragment length
         target_gc=0.42,        # Typical cfDNA GC content
-        target_ff=0.10,        # 10% fetal fraction
+        target_ff=0.10,        # API default; v15 FF path is collapsed
     )
 
     # Print the generated sequences

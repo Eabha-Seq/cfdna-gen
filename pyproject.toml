@@ -87,6 +87,13 @@ warn_unused_ignores = true
 ignore_missing_imports = true
 strict = false
 
+# Newer NumPy stubs use PEP 695 `type` statements. CI runs mypy with
+# python_version=3.10 on every matrix job, which then fails inside numpy's
+# own .pyi. Skip those stubs; we already ignore missing third-party imports.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"

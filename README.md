@@ -6,21 +6,39 @@
 
 **Conditional Causal Transformer for Cell-Free DNA Sequence Generation**
 
-Generate realistic synthetic cell-free DNA (cfDNA) sequences for NIPT simulation, benchmark development, and genomics research.
+Generate realistic synthetic cell-free DNA (cfDNA) sequences for NIPT
+simulation, benchmark development, and genomics research.
 
 ## Overview
 
-cfDNA-Gen is a 120M parameter causal transformer trained on real cell-free DNA data. It generates synthetic cfDNA sequences with controllable properties:
+cfDNA-Gen is a 120M parameter causal transformer trained on real cell-free
+DNA data. It generates synthetic cfDNA sequences with controllable
+**fragment length** and **GC content**. That is what the published v15
+weights actually do well:
 
-- **Fragment length**: Control the length of generated fragments (typically 50-250bp)
-- **GC content**: Target specific GC content (typical cfDNA: ~42%)
-- **Fetal fraction**: Simulate different fetal fractions for NIPT applications (0-40%)
+- Length-conditioned sequence realism (typically 50–250 bp)
+- GC-conditioned composition (typical cfDNA ~42%)
+- Nucleosome-associated 10 bp periodicity and characteristic end motifs
 
-The model captures realistic patterns found in cfDNA including:
-- Bimodal fragment length distribution (fetal ~144bp, maternal ~167bp)
-- Nucleosome-associated 10bp periodicity
-- Position-specific nucleotide preferences
-- Characteristic end motifs
+**Fetal fraction is library-level style conditioning**, not a
+per-fragment origin switch. The API takes `target_ff` (default **0.10**)
+on a dual path: an FF **bin token** plus a continuous `FFEmbedding`.
+Bins are non-uniform; the left tail is coarse (**0–2% share one bin** —
+0.5% and 1.9% are the same token).
+
+### Published v15 weights (`eabhaseq/cfdna-gen`)
+
+The continuous FF path is **effectively collapsed** (near-constant), and
+the 17 FF bin token embeddings are nearly identical. **Do not claim that
+setting `target_ff` alone simulates different fetal fractions or bimodal
+low-FF libraries.** Low-FF packs must define that look in a **mixer**
+(length mix, maternal vs fetal origin, coverage) — for example
+`eabhaseq-synthetic` — not via `target_ff` alone.
+
+A bimodal length mix (fetal-like ~144 bp, maternal-like ~167 bp) is
+created by **sampling `fragment_lengths`**, not by changing `target_ff`.
+See [docs/FF_CONDITIONING_FIX.md](docs/FF_CONDITIONING_FIX.md) for what a
+proper continued train would need. This public repo is inference-only.
 
 ## Installation
 
@@ -44,7 +62,7 @@ sequences = generator.generate(
     n_sequences=100,
     fragment_lengths=165,  # Target length in bp
     target_gc=0.42,        # Target GC content
-    target_ff=0.10,        # Fetal fraction (10%)
+    target_ff=0.10,        # Default library-level FF token (v15: collapsed)
 )
 
 for seq in sequences[:5]:
@@ -68,7 +86,7 @@ sequences = generator.generate(
 ```python
 import numpy as np
 
-# Generate with realistic length distribution
+# Bimodal fetal/maternal *look* comes from the length mix, not target_ff
 lengths = np.random.normal(167, 12, size=100).astype(int)
 lengths = np.clip(lengths, 100, 250)
 
@@ -146,7 +164,7 @@ Token Embedding (64 -> 768)
     |
 + Length Embedding (continuous)
 + GC Embedding (continuous)
-+ FF Embedding (continuous)
++ FF Embedding (continuous; collapsed on published v15)
     |
 14 x TransformerBlock (Pre-norm)
   |-- RMSNorm
@@ -168,7 +186,11 @@ Output Projection (768 -> 64)
 
 | Model | Size | Description |
 |-------|------|-------------|
-| `eabhaseq/cfdna-gen` | ~500MB | Latest, optimized for GC/FF conditioning |
+| `eabhaseq/cfdna-gen` | ~500MB | v15 public checkpoint. Strong length/GC-conditioned sequence realism. FF path present but collapsed — see above. |
+
+There is no separate in-tree Hugging Face model card; treat this README
+and [docs/FF_CONDITIONING_FIX.md](docs/FF_CONDITIONING_FIX.md) as the
+source of truth until a post-retrain card is published.
 
 ## Local Model Loading
 
@@ -182,9 +204,19 @@ from cfdna_gen import CfDNACausalLM
 model = CfDNACausalLM.from_pretrained("./path/to/model")
 ```
 
+Loading a checkpoint whose continuous FF embed barely moves between
+0.01 and 0.10 emits a `UserWarning`. To run the same check on real
+weights (not executed in CI):
+
+```bash
+python scripts/check_ff_embedding_collapse.py --model eabhaseq/cfdna-gen
+```
+
 ## Validation Results
 
-The v15 model achieves:
+The v15 numbers below measure **length/GC-conditioned sequence realism**
+against real cfDNA. They are **not** FF-stratified and do **not** show
+that `target_ff` changes generated sequences.
 
 | Metric | Score |
 |--------|-------|
@@ -195,12 +227,18 @@ The v15 model achieves:
 | Bimodal Peaks Detection | 100% |
 | Nucleosome Periodicity | 100% |
 
+Bimodal peak detection reflects mixed `fragment_lengths` in the
+validation suite (short fetal-like + longer maternal-like), not
+`target_ff`.
+
 ## Use Cases
 
-- **NIPT Simulation**: Generate synthetic samples with known conditions for algorithm development
-- **Benchmarking**: Create standardized test datasets for cfDNA analysis pipelines
-- **Training Data**: Augment real datasets for machine learning applications
-- **Method Development**: Test new analysis methods on controlled synthetic data
+- **NIPT simulation (mixer-defined mix):** Generate length/GC-realistic
+  fragments; put maternal vs fetal origin, coverage, and low-FF look in
+  the caller or `eabhaseq-synthetic`, not in `target_ff` alone
+- **Benchmarking:** Create standardized test datasets for cfDNA analysis pipelines
+- **Training data:** Augment real datasets for machine learning applications
+- **Method development:** Test new analysis methods on controlled synthetic data
 
 ## Requirements
 
@@ -235,6 +273,10 @@ See [LICENSE](LICENSE) for full terms.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+This repository is the **inference** package. Training and data
+pipelines are private; see [docs/FF_CONDITIONING_FIX.md](docs/FF_CONDITIONING_FIX.md)
+if you are planning a continued-train FF fix.
 
 ## Acknowledgments
 

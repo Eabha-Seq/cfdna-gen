@@ -33,7 +33,9 @@ jobs:
 
       - name: Type check with mypy
         run: |
-          mypy cfdna_gen/ --ignore-missing-imports
+          # Match the runner: pyproject pins python_version=3.10, but 3.12
+          # installs NumPy stubs that use PEP 695 `type` statements.
+          mypy cfdna_gen/ --ignore-missing-imports --python-version ${{ matrix.python-version }}
 
       - name: Run tests
         run: |

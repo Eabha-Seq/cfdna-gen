@@ -14,7 +14,9 @@ python basic_generation.py
 
 ### variable_lengths.py
 
-Demonstrates generating sequences with a realistic bimodal fragment length distribution, mimicking real cfDNA data with both fetal and maternal fragments.
+Demonstrates a mixer-style bimodal length mix (shorter fetal-like + longer
+maternal-like fragments). On published v15 weights that look comes from
+`fragment_lengths`, not from `target_ff`.
 
 ```bash
 python variable_lengths.py

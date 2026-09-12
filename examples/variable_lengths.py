@@ -7,6 +7,7 @@ fragment length distribution, mimicking real cfDNA data.
 """
 
 import numpy as np
+
 from cfdna_gen import CfDNAGenerator
 
 
@@ -14,12 +15,14 @@ def main():
     print("Loading model...")
     generator = CfDNAGenerator.from_pretrained("eabhaseq/cfdna-gen")
 
-    # Real cfDNA has a bimodal distribution:
-    # - Fetal fragments: ~144bp (shorter)
-    # - Maternal fragments: ~167bp (longer)
+    # Real cfDNA has a bimodal length mix. On published v15 weights that
+    # look comes from sampling fragment lengths (mixer-style), not from
+    # target_ff — the continuous FF path is collapsed.
+    # - Fetal-like fragments: ~144bp (shorter)
+    # - Maternal-like fragments: ~167bp (longer)
 
     n_sequences = 100
-    fetal_fraction = 0.10  # 10% fetal
+    fetal_fraction = 0.10  # mix proportion for lengths; API default target_ff
 
     # Sample fragment lengths from bimodal distribution
     n_fetal = int(n_sequences * fetal_fraction)
@@ -37,7 +40,7 @@ def main():
     all_lengths = np.concatenate([fetal_lengths, maternal_lengths])
     np.random.shuffle(all_lengths)
 
-    print(f"\nFragment length statistics:")
+    print("\nFragment length statistics:")
     print(f"  Mean: {all_lengths.mean():.1f}bp")
     print(f"  Std:  {all_lengths.std():.1f}bp")
     print(f"  Min:  {all_lengths.min()}bp")
@@ -55,7 +58,7 @@ def main():
 
     # Verify output lengths match input
     actual_lengths = [len(s) for s in sequences]
-    print(f"\nOutput length statistics:")
+    print("\nOutput length statistics:")
     print(f"  Mean: {np.mean(actual_lengths):.1f}bp")
     print(f"  Std:  {np.std(actual_lengths):.1f}bp")
 

@@ -1,13 +1,21 @@
 """Tests for the CfDNAGenerator high-level API."""
 
-import pytest
-import torch
-import numpy as np
 import tempfile
 from pathlib import Path
 
-from cfdna_gen.generate import CfDNAGenerator
+import numpy as np
+import pytest
+import torch
+
+from cfdna_gen.generate import CfDNAGenerator, pad_condition_tokens
 from cfdna_gen.model import CfDNACausalLM, CfDNAConfig
+from cfdna_gen.tokens import (
+    TOKEN_A,
+    TOKEN_PAD,
+    get_ff_bin_token,
+    get_gc_bin_token,
+    get_len_bin_token,
+)
 
 
 class TestCfDNAGenerator:
@@ -44,7 +52,11 @@ class TestCfDNAGenerator:
         assert all(set(s).issubset({"A", "C", "G", "T"}) for s in sequences)
 
     def test_generate_with_gc_ff(self, small_generator):
-        """Test generation with GC and FF conditioning."""
+        """Generation accepts GC and FF kwargs.
+
+        Does not assert that target_ff changes sequences: published v15
+        FF embeddings are collapsed, and random test models have no FF signal.
+        """
         sequences = small_generator.generate(
             n_sequences=5,
             fragment_lengths=30,
@@ -53,6 +65,15 @@ class TestCfDNAGenerator:
         )
 
         assert len(sequences) == 5
+
+    def test_generate_ff_out_of_range_warns(self, small_generator):
+        """API warns once when target_ff is outside the documented range."""
+        with pytest.warns(UserWarning, match="outside the documented range"):
+            small_generator.generate(
+                n_sequences=2,
+                fragment_lengths=20,
+                target_ff=0.9,
+            )
 
     def test_generate_variable_lengths(self, small_generator):
         """Test generation with variable fragment lengths."""
@@ -226,5 +247,27 @@ class TestGeneratorFromPretrained:
 
     def test_from_pretrained_invalid_path(self):
         """Test that invalid path raises error."""
-        with pytest.raises((ValueError, FileNotFoundError)):
+        with pytest.raises((ValueError, FileNotFoundError, ImportError)):
             CfDNAGenerator.from_pretrained("/nonexistent/path")
+
+
+class TestPadConditionTokens:
+    """Condition-token padding must use TOKEN_PAD, not a nucleotide token."""
+
+    def test_pads_with_token_pad_not_a(self):
+        """Shorter condition lists are padded with TOKEN_PAD (6), not TOKEN_A (0)."""
+        longer = [get_len_bin_token(165), get_gc_bin_token(0.42), get_ff_bin_token(0.10)]
+        shorter = [get_len_bin_token(165)]
+        padded = pad_condition_tokens([longer, shorter])
+
+        assert padded[0] == longer
+        assert padded[1][:1] == shorter
+        assert padded[1][1:] == [TOKEN_PAD, TOKEN_PAD]
+        assert TOKEN_A not in padded[1][1:]
+        assert all(len(row) == 3 for row in padded)
+
+    def test_empty_and_already_aligned(self):
+        """Empty input stays empty; equal-length lists are unchanged."""
+        assert pad_condition_tokens([]) == []
+        rows = [[7, 27], [8, 28]]
+        assert pad_condition_tokens(rows) == rows

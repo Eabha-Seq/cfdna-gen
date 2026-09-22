@@ -1,0 +1,17 @@
+# Local run artefacts (FASTQ is multi-GB; do not commit)
+work/
+out/
+ref/*.npz
+*.zip
+*.bam
+*.bai
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.fa
+*.fa.gz
+*.fna
+*.fna.gz
+*.npz
+__pycache__/

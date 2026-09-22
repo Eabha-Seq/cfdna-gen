@@ -1,0 +1,46 @@
+# Optional thin wrapper around Mode A / Mode B. Stay under ~80 lines.
+from pathlib import Path
+
+RECIPE = Path(workflow.basedir)
+WORKDIR = config.get("workdir", str(RECIPE / "work"))
+OUTDIR = config.get("outdir", str(RECIPE / "out"))
+REF_FA = config.get("ref_fa", "")
+WX_REF = config.get("wx_ref", "")
+
+if not REF_FA:
+    raise ValueError("pass --config ref_fa=/path/to/GRCh38.fa")
+
+
+rule all:
+    input:
+        f"{WORKDIR}/qc_table.txt",
+        f"{OUTDIR}/wx_done.txt",
+
+
+rule mode_a_qc:
+    output:
+        qc=f"{WORKDIR}/qc_table.txt",
+        bam=f"{WORKDIR}/sample.bam",
+    params:
+        ref=REF_FA,
+        work=WORKDIR,
+    threads: workflow.cores
+    shell:
+        "{RECIPE}/run_qc.sh {params.ref} --workdir {params.work} --threads {threads}"
+
+
+rule mode_b_wx:
+    input:
+        bam=f"{WORKDIR}/sample.bam",
+    output:
+        f"{OUTDIR}/wx_done.txt",
+    params:
+        ref=WX_REF,
+        work=WORKDIR,
+        out=OUTDIR,
+        extra=("--ref " + WX_REF) if WX_REF else "",
+    shell:
+        """
+        {RECIPE}/run_wx.sh --bam {input.bam} --workdir {params.work} --outdir {params.out} {params.extra}
+        date > {output}
+        """

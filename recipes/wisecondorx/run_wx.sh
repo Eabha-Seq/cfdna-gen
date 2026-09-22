@@ -122,20 +122,24 @@ BAM="${BAM:-${WORKDIR}/sample.bam}"
 DEFAULT_REF="${SCRIPT_DIR}/ref/synthetic_euploid_nipt.npz"
 
 if [[ -n "$BUILD_REF" ]]; then
-  WX="$(wx_bin)" || die "wisecondorx not found
-  conda env create -f environment.yml
-  conda activate eabhaseq-wx"
+  [[ -d "$BUILD_REF" ]] || die "--build-ref is not a directory: $BUILD_REF"
   mapfile -t NPZ < <(find "$BUILD_REF" -maxdepth 1 -type f -name '*.npz' | sort)
   if [[ ${#NPZ[@]} -lt 50 ]]; then
     die "--build-ref needs >=50 euploid .npz (found ${#NPZ[@]}). This recipe will not generate them."
   fi
+  WX="$(wx_bin)" || die "wisecondorx not found
+  conda env create -f environment.yml
+  conda activate eabhaseq-wx"
   mkdir -p "${SCRIPT_DIR}/ref"
   printf 'Building NIPT reference from %s files ...\n' "${#NPZ[@]}"
   "$WX" newref "${NPZ[@]}" "$DEFAULT_REF" --nipt --binsize "$BINSZ"
   REF="$DEFAULT_REF"
 fi
 
-if [[ -z "$REF" && -n "${EABHASEQ_WX_REF:-}" ]]; then
+if [[ -n "$REF" && ! -f "$REF" ]]; then
+  die "--ref is not a file: $REF"
+fi
+if [[ -z "$REF" && -n "${EABHASEQ_WX_REF:-}" && -f "$EABHASEQ_WX_REF" ]]; then
   REF="$EABHASEQ_WX_REF"
 fi
 if [[ -z "$REF" && -f "$DEFAULT_REF" ]]; then
@@ -158,13 +162,13 @@ if [[ -z "$REF" || ! -f "$REF" ]]; then
   exit 0
 fi
 
-WX="$(wx_bin)" || die "wisecondorx not found
-  conda env create -f environment.yml
-  conda activate eabhaseq-wx"
-
 [[ -f "$BAM" ]] || die "BAM not found: $BAM
 Run Mode A first:
   ./run_qc.sh /path/to/GRCh38.fa"
+
+WX="$(wx_bin)" || die "wisecondorx not found
+  conda env create -f environment.yml
+  conda activate eabhaseq-wx"
 
 SAMPLE_NPZ="${WORKDIR}/sample.npz"
 OUT_PREFIX="${OUTDIR}/t21"

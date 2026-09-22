@@ -55,14 +55,8 @@ def find_stats_file(path: Path) -> Path:
         if item not in seen:
             seen.append(item)
     if not seen:
-        raise FileNotFoundError(
-            f"no *_statistics.bed / *_statistics.txt under {path}"
-        )
-    preferred = [
-        p
-        for p in seen
-        if "statistics" in p.name.lower() and "bin" not in p.name.lower()
-    ]
+        raise FileNotFoundError(f"no *_statistics.bed / *_statistics.txt under {path}")
+    preferred = [p for p in seen if "statistics" in p.name.lower() and "bin" not in p.name.lower()]
     return preferred[0] if preferred else seen[0]
 
 
